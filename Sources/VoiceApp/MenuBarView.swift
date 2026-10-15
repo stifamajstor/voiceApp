@@ -7,6 +7,7 @@ import SwiftUI
 struct MenuBarView: View {
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var dictation: DictationController
+    @EnvironmentObject private var updater: Updater
     @AppStorage(TextInserter.keepOnClipboardKey) private var keepOnClipboard = false
 
     var body: some View {
@@ -173,6 +174,13 @@ struct MenuBarView: View {
     private var footer: some View {
         HStack {
             OpenSettingsButton()
+            Button {
+                updater.checkForUpdates()
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .disabled(!updater.canCheckForUpdates)
+            .help("Check for updates (v\(updater.currentVersion))")
             Spacer()
             Button("Quit VoiceApp") { NSApp.terminate(nil) }
                 .keyboardShortcut("q")

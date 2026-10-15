@@ -94,10 +94,31 @@ for bundle in "$BIN_DIR"/*.bundle; do
     echo "    resource bundle: $(basename "$bundle")"
     ditto "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
 done
+
+# Dynamic frameworks from binary dependencies (Sparkle) go in Contents/Frameworks.
+mkdir -p "$APP/Contents/Frameworks"
+for framework in "$BIN_DIR"/*.framework; do
+    echo "    framework: $(basename "$framework")"
+    ditto "$framework" "$APP/Contents/Frameworks/$(basename "$framework")"
+done
 shopt -u nullglob
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/$APP_NAME"
 
 echo "==> Signing (identity: $SIGN_IDENTITY)"
-codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+# Sign nested code inside-out instead of --deep, which would stamp the app's identifier onto
+# Sparkle's helpers. Sparkle's updater requires every update to carry the same signature.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+    for nested in \
+        "$SPARKLE/Versions/B/XPCServices/Installer.xpc" \
+        "$SPARKLE/Versions/B/XPCServices/Downloader.xpc" \
+        "$SPARKLE/Versions/B/Autoupdate" \
+        "$SPARKLE/Versions/B/Updater.app" \
+        "$SPARKLE"; do
+        codesign --force --sign "$SIGN_IDENTITY" --preserve-metadata=entitlements "$nested"
+    done
+fi
+codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --deep --strict "$APP"
 
 echo "==> Built $APP"

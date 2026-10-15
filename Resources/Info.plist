@@ -34,5 +34,15 @@
 	<string>VoiceApp records your voice while you hold or toggle the dictation shortcut, and transcribes it on this Mac. Audio never leaves your computer.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/stifamajstor/voiceApp/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>iL8Hlm68zbYN6KEtbjXg6z9JAw8Ul7uY2KsqmA441Vc=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
 </dict>
 </plist>

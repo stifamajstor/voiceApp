@@ -111,13 +111,34 @@ Without Accessibility, the transcript stays on the clipboard and the menu report
 - **Text is copied but not pasted:** enable VoiceApp under **System Settings → Privacy & Security → Accessibility**, then try again. Keep the intended text field focused until transcription finishes.
 - **Paste or modifier shortcuts stop working after a rebuild:** remove VoiceApp from Accessibility and add the current `.app` again. Ad-hoc signatures can invalidate the existing grant. A stable signing identity helps preserve it across builds.
 - **Shortcut conflicts with another app:** rebind it in Settings. A modifier-only trigger is canceled if you type another key while holding it.
-- **Disable start/stop sounds:** run `defaults write com.local.voiceapp playFeedbackSounds -bool false`. Use `true` to re-enable them.
+- **Disable start/stop sounds:** turn off **Play start/stop sounds** in Settings → Behavior.
 
 To create a local signing identity, open **Keychain Access → Certificate Assistant → Create a Certificate**, name it **VoiceApp Local Signing**, and choose **Code Signing** as its certificate type.
 
+## Updates
+
+Installed copies update themselves with [Sparkle](https://sparkle-project.org) from this repository's GitHub releases. VoiceApp checks every 6 hours and installs a downloaded update when it next quits; **Check for Updates…** is in the menu bar popover and in Settings → Updates.
+
+To publish a release, run this on the Mac that holds the signing keys, from a clean `main`:
+
+```sh
+scripts/release.sh 0.3.0 --notes "First change
+Second change"              # Prepare build/release/ and tag v0.3.0 locally
+scripts/release.sh 0.3.0 --notes "..." --publish   # Also push and create the GitHub release
+```
+
+The script bumps the version in `Resources/Info.plist`, builds and signs the app, makes the DMG and update zip, signs the update with the Sparkle EdDSA key, and generates `appcast.xml`. The first run asks for keychain access twice (the code-signing certificate and the Sparkle key); choose **Always Allow**.
+
+Two keys must stay on this Mac and be backed up together:
+
+- **VoiceApp Local Signing** certificate: macOS ties the Accessibility grant to it, and Sparkle rejects updates signed differently.
+- Sparkle EdDSA private key, keychain account `voiceapp` (public half in `SUPublicEDKey`). Export with `.build/artifacts/sparkle/Sparkle/bin/generate_keys --account voiceapp -x key-backup`.
+
+Losing either means installed copies can no longer update and need one manual reinstall.
+
 ## Development
 
-VoiceApp is a Swift package with one executable target. Its main dependencies are [WhisperKit](https://github.com/argmaxinc/WhisperKit), [FluidAudio](https://github.com/FluidInference/FluidAudio), and [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts). `Package.resolved` records the resolved versions.
+VoiceApp is a Swift package with one executable target. Its main dependencies are [WhisperKit](https://github.com/argmaxinc/WhisperKit), [FluidAudio](https://github.com/FluidInference/FluidAudio), [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts), and [Sparkle](https://github.com/sparkle-project/Sparkle). `Package.resolved` records the resolved versions.
 
 ```sh
 swift build                         # Compile for development
@@ -134,9 +155,10 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | `DictationController.swift`, `AudioRecorder.swift` | Dictation state and microphone capture |
 | `HotkeyManager.swift`, `ModifierHotkey.swift` | Global shortcuts |
 | `TextInserter.swift`, `Permissions.swift` | Clipboard insertion and macOS permissions |
-| `SettingsView.swift`, `MenuBarView.swift` | Settings and menu bar interface |
+| `SettingsView.swift`, `MenuBarView.swift`, `Theme.swift` | Settings and menu bar interface |
+| `Updater.swift` | Sparkle self-updates |
 | `Resources/` | App metadata and icon |
-| `scripts/` | App bundle and DMG packaging |
+| `scripts/` | App bundle, DMG packaging, and releases |
 
 Swift filenames in this table live under `Sources/VoiceApp/`. The build script adjusts generated SwiftPM resource accessors and copies dependency bundles into `Contents/Resources`, so the packaged app does not depend on the source checkout's `.build` directory.
 

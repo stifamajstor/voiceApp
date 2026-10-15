@@ -5,6 +5,7 @@ import SwiftUI
 struct VoiceApp: App {
     @StateObject private var modelManager: ModelManager
     @StateObject private var dictation: DictationController
+    @StateObject private var updater = Updater()
 
     init() {
         ModifierKey.registerDefaults()
@@ -21,6 +22,7 @@ struct VoiceApp: App {
             MenuBarView()
                 .environmentObject(modelManager)
                 .environmentObject(dictation)
+                .environmentObject(updater)
         } label: {
             MenuBarIcon(dictation: dictation, modelManager: modelManager)
         }
@@ -29,6 +31,7 @@ struct VoiceApp: App {
         Settings {
             SettingsView()
                 .environmentObject(modelManager)
+                .environmentObject(updater)
         }
     }
 }

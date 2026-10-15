@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var modelManager: ModelManager
+    @EnvironmentObject private var updater: Updater
     @AppStorage(ModifierKey.Action.pushToTalk.defaultsKey) private var pushToTalkModifier = ModifierKey.rightOption.rawValue
     @AppStorage(ModifierKey.Action.toggleToTalk.defaultsKey) private var toggleModifier = ModifierKey.none.rawValue
 
@@ -81,6 +82,28 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.textSecondary)
             }
             .toggleStyle(.switch)
+
+            Section {
+                Toggle("Check for updates automatically", isOn: Binding(
+                    get: { updater.automaticallyChecksForUpdates },
+                    set: { updater.automaticallyChecksForUpdates = $0 }
+                ))
+                .toggleStyle(.switch)
+                HStack {
+                    Text("Version \(updater.currentVersion)")
+                        .foregroundStyle(Theme.textSecondary)
+                    Spacer()
+                    Button("Check for Updates…") { updater.checkForUpdates() }
+                        .buttonStyle(NeonButtonStyle())
+                        .disabled(!updater.canCheckForUpdates)
+                }
+            } header: {
+                SectionTitle("Updates")
+            } footer: {
+                Text("New versions are downloaded from the project's GitHub releases and installed when VoiceApp next quits or relaunches.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
 
             PermissionsSection()
         }
