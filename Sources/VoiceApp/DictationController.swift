@@ -25,7 +25,7 @@ final class DictationController: ObservableObject {
     /// Newest first, capped at `historyLimit`. Not persisted.
     @Published private(set) var recentTranscripts: [Transcript] = []
 
-    static let historyLimit = 5
+    static let historyLimit = 3
 
     /// Recordings shorter than this are treated as accidental taps and dropped.
     static let minimumDuration: TimeInterval = 0.3

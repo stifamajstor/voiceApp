@@ -240,8 +240,8 @@ private struct TranscriptRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(transcript.text)
                         .font(.callout)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                         .foregroundStyle(Theme.textPrimary)
                     Text(transcript.date, style: .relative)
                         .font(.caption2)
@@ -264,7 +264,7 @@ private struct TranscriptRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("Copy to clipboard")
+        .help(transcript.text)
         // Restarts on every click, so an older tap can't clear the checkmark of a newer one.
         .task(id: copyCount) {
             guard copyCount > 0 else { return }

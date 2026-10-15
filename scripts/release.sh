@@ -105,7 +105,7 @@ DMG="$ROOT/build/$APP_NAME-$VERSION.dmg"
 if [[ "$PUBLISH" -eq 0 ]]; then
     echo "Not published. To publish:"
     echo "  git push origin HEAD $TAG"
-    echo "  gh release create $TAG --repo $REPO --title \"$APP_NAME $VERSION\" \"$ARCHIVE\" \"$DMG\" \"$OUT/appcast.xml\""
+    echo "  gh release create $TAG --repo $REPO --title \"$APP_NAME $VERSION\" --notes \"${NOTES:-$APP_NAME $VERSION}\" \"$ARCHIVE\" \"$DMG\" \"$OUT/appcast.xml\""
     exit 0
 fi
 
