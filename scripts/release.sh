@@ -59,6 +59,8 @@ if [[ ! -x "$SPARKLE_BIN/generate_appcast" ]]; then
 fi
 
 echo "==> Versioning $VERSION"
+# If anything fails before the release commit, put Info.plist back so the script can be rerun.
+trap 'git checkout -- "$PLIST"' ERR
 BUILD=$(( $(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$PLIST") + 1 ))
 /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString $VERSION" "$PLIST"
 /usr/libexec/PlistBuddy -c "Set CFBundleVersion $BUILD" "$PLIST"
@@ -95,6 +97,7 @@ curl -fsSL "https://github.com/$REPO/releases/latest/download/appcast.xml" -o "$
 
 git add "$PLIST"
 git commit -q -m "Release $VERSION"
+trap - ERR
 git tag "$TAG"
 echo "==> Prepared $TAG (build $BUILD) in $OUT"
 
