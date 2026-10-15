@@ -38,9 +38,20 @@ enum TextInserter {
 
     private static var pending: PendingRestore?
 
+    /// UserDefaults key: leave the transcript on the clipboard after pasting instead of restoring
+    /// the previous contents.
+    static let keepOnClipboardKey = "keepTranscriptOnClipboard"
+
+    /// Puts `text` on the clipboard as a regular (non-transient) entry.
+    static func copy(_ text: String) {
+        flushPendingRestore()
+        write(text, to: NSPasteboard.general, transient: false)
+    }
+
     /// Pastes `text` into the focused app. If Accessibility isn't granted the text is left on the
-    /// clipboard and `InsertError.accessibilityNotGranted` is thrown.
-    static func insert(_ text: String) async throws {
+    /// clipboard and `InsertError.accessibilityNotGranted` is thrown. With `keepOnClipboard` the
+    /// transcript stays on the clipboard afterwards instead of the previous contents coming back.
+    static func insert(_ text: String, keepOnClipboard: Bool = false) async throws {
         guard !text.isEmpty else { return }
         let pasteboard = NSPasteboard.general
 
@@ -56,13 +67,14 @@ enum TextInserter {
         // If the user is still holding the hotkey's modifiers, ⌘V would arrive as e.g. ⌥⌘V.
         await waitForModifierRelease()
 
-        let saved = capture(pasteboard)
-        let ourChangeCount = write(text, to: pasteboard, transient: true)
+        let saved = keepOnClipboard ? [] : capture(pasteboard)
+        let ourChangeCount = write(text, to: pasteboard, transient: !keepOnClipboard)
 
         guard postPaste() else {
             write(text, to: pasteboard, transient: false) // keep it available for a manual ⌘V
             throw InsertError.pasteEventFailed
         }
+        if keepOnClipboard { return }
 
         let task = Task { @MainActor in
             try? await Task.sleep(for: restoreDelay)

@@ -44,7 +44,7 @@ struct MenuBarIcon: View {
         case .recording:
             Image(nsImage: Self.recordingImage)
         case .transcribing:
-            Image(systemName: "waveform")
+            Image(nsImage: Self.transcribingImage)
         case .error:
             Image(systemName: "exclamationmark.triangle")
         case .idle:
@@ -56,14 +56,27 @@ struct MenuBarIcon: View {
         }
     }
 
-    /// Menu bar labels are rendered as templates (monochrome), so the red recording glyph
-    /// needs a non-template image.
-    private static let recordingImage: NSImage = {
+    /// NSColor equivalent of Theme.neon (#39FF64).
+    private static let neonGreen = NSColor(srgbRed: 0.224, green: 1.0, blue: 0.392, alpha: 1)
+
+    /// Menu bar labels are rendered as templates (monochrome), so active colored glyphs
+    /// need non-template images with palette symbol configurations.
+    private static func coloredImage(systemSymbolName: String, accessibilityDescription: String?) -> NSImage {
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [.systemRed]))
-        let image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "Recording")?
+            .applying(NSImage.SymbolConfiguration(paletteColors: [neonGreen]))
+        let image = NSImage(systemSymbolName: systemSymbolName, accessibilityDescription: accessibilityDescription)?
             .withSymbolConfiguration(config) ?? NSImage()
         image.isTemplate = false
         return image
-    }()
+    }
+
+    private static let recordingImage: NSImage = coloredImage(
+        systemSymbolName: "mic.fill",
+        accessibilityDescription: "Recording"
+    )
+
+    private static let transcribingImage: NSImage = coloredImage(
+        systemSymbolName: "waveform",
+        accessibilityDescription: "Transcribing"
+    )
 }

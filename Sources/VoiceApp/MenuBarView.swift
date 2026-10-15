@@ -2,87 +2,189 @@ import AppKit
 import KeyboardShortcuts
 import SwiftUI
 
-/// Content of the menu bar popover: status, quick model picker, shortcuts, Settings and Quit.
+/// Content of the menu bar popover: status, quick model picker, recent transcripts, shortcuts,
+/// Settings and Quit.
 struct MenuBarView: View {
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var dictation: DictationController
+    @AppStorage(TextInserter.keepOnClipboardKey) private var keepOnClipboard = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             header
-            Divider()
             modelSection
+            recentSection
             shortcutsSection
-            Divider()
-            HStack {
-                OpenSettingsButton()
-                Spacer()
-                Button("Quit VoiceApp") { NSApp.terminate(nil) }
-                    .keyboardShortcut("q")
-            }
+            footer
         }
-        .padding(12)
-        .frame(width: 300)
+        .padding(14)
+        .frame(width: 320)
+        .background(Theme.background.ignoresSafeArea())
+        .foregroundStyle(Theme.textPrimary)
+        .tint(Theme.neon)
+        .preferredColorScheme(.dark)
     }
 
+    // MARK: - Header
+
     private var header: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: dictationSymbol)
-                .font(.title2)
-                .foregroundStyle(dictationColor)
-                .frame(width: 28)
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(dictationColor.opacity(0.12))
+                Circle().strokeBorder(dictationColor.opacity(0.55), lineWidth: 1)
+                Image(systemName: dictationSymbol)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(dictationColor)
+                    .symbolEffect(.pulse, isActive: isBusy)
+            }
+            .frame(width: 40, height: 40)
+            .shadow(color: dictationColor.opacity(isBusy ? 0.7 : (modelManager.isReady ? 0.3 : 0)), radius: isBusy ? 10 : 6)
+
             VStack(alignment: .leading, spacing: 2) {
-                Text(dictationTitle).font(.headline).lineLimit(2)
+                Text(dictationTitle)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(2)
                 Text(modelManager.statusDescription)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
                     .lineLimit(3)
             }
+            Spacer(minLength: 0)
         }
+        .animation(.easeInOut(duration: 0.2), value: dictation.state)
     }
+
+    // MARK: - Model
 
     @ViewBuilder
     private var modelSection: some View {
         let downloaded = modelManager.downloadedModels
-        if downloaded.isEmpty {
-            Text("No model downloaded yet. Open Settings to download one.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        } else {
-            Picker("Model", selection: $modelManager.selectedModelID) {
-                ForEach(downloaded) { model in
-                    Text(model.displayName).tag(model.id)
+        VStack(alignment: .leading, spacing: 6) {
+            SectionTitle("Model")
+            if downloaded.isEmpty {
+                Text("No model downloaded yet. Open Settings to download one.")
+                    .font(.callout)
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                Picker("Model", selection: $modelManager.selectedModelID) {
+                    ForEach(downloaded) { model in
+                        Text(model.displayName).tag(model.id)
+                    }
+                    // Keep the picker valid if the selected model isn't downloaded.
+                    if !downloaded.contains(where: { $0.id == modelManager.selectedModelID }) {
+                        Text(modelManager.selectedModel?.displayName ?? "None")
+                            .tag(modelManager.selectedModelID)
+                    }
                 }
-                // Keep the picker valid if the selected model isn't downloaded.
-                if !downloaded.contains(where: { $0.id == modelManager.selectedModelID }) {
-                    Text(modelManager.selectedModel?.displayName ?? "None")
-                        .tag(modelManager.selectedModelID)
-                }
+                .labelsHidden()
+                .disabled(modelManager.loadState == .loading)
             }
-            .disabled(modelManager.loadState == .loading)
         }
+        .themeCard()
     }
 
+    // MARK: - Recent transcripts
+
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                SectionTitle("Recent")
+                Spacer()
+                if let last = dictation.recentTranscripts.first {
+                    Button {
+                        dictation.copyToClipboard(last)
+                    } label: {
+                        Label("Copy last", systemImage: "doc.on.doc")
+                    }
+                    .buttonStyle(NeonButtonStyle())
+                    .keyboardShortcut("c")
+                    .help("Copy the latest transcript to the clipboard (⌘C)")
+                }
+            }
+
+            if dictation.recentTranscripts.isEmpty {
+                Text("Your transcripts show up here, ready to copy again. They stay in memory on this Mac only.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(dictation.recentTranscripts) { transcript in
+                        TranscriptRow(transcript: transcript) {
+                            dictation.copyToClipboard(transcript)
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Toggle("Keep on clipboard after paste", isOn: $keepOnClipboard)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                if !dictation.recentTranscripts.isEmpty {
+                    Button("Clear") { dictation.clearHistory() }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+        }
+        .themeCard()
+    }
+
+    // MARK: - Shortcuts
+
     private var shortcutsSection: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionTitle("Shortcuts")
             shortcutRow("Push to talk", name: .pushToTalk, modifier: .pushToTalk)
             shortcutRow("Toggle", name: .toggleToTalk, modifier: .toggleToTalk)
         }
         .font(.caption)
+        .themeCard()
     }
 
     private func shortcutRow(_ title: String, name: KeyboardShortcuts.Name, modifier: ModifierKey.Action) -> some View {
         let key = ModifierKey.current(for: modifier)
         let triggers = [key == .none ? nil : key.title, KeyboardShortcuts.getShortcut(for: name)?.description].compactMap { $0 }
         return HStack {
-            Text(title).foregroundStyle(.secondary)
+            Text(title).foregroundStyle(Theme.textSecondary)
             Spacer()
-            Text(triggers.isEmpty ? "Not set" : triggers.joined(separator: " or "))
-                .monospaced()
+            if triggers.isEmpty {
+                Text("Not set").foregroundStyle(Theme.textSecondary)
+            } else {
+                ForEach(triggers, id: \.self) { trigger in
+                    Text(trigger)
+                        .monospaced()
+                        .foregroundStyle(Theme.neon)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(Theme.neon.opacity(0.08)))
+                        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.neon.opacity(0.25)))
+                }
+            }
         }
     }
 
+    // MARK: - Footer
+
+    private var footer: some View {
+        HStack {
+            OpenSettingsButton()
+            Spacer()
+            Button("Quit VoiceApp") { NSApp.terminate(nil) }
+                .keyboardShortcut("q")
+        }
+        .buttonStyle(NeonButtonStyle())
+    }
+
     // MARK: - Dictation state presentation
+
+    private var isBusy: Bool {
+        dictation.state == .recording || dictation.state == .transcribing
+    }
 
     private var dictationTitle: String {
         switch dictation.state {
@@ -104,10 +206,63 @@ struct MenuBarView: View {
 
     private var dictationColor: Color {
         switch dictation.state {
-        case .idle: return modelManager.isReady ? .primary : .secondary
-        case .recording: return .red
-        case .transcribing: return .accentColor
-        case .error: return .orange
+        case .idle: return modelManager.isReady ? Theme.neon : Theme.textSecondary
+        case .recording, .transcribing: return Theme.neon
+        case .error: return Theme.warning
+        }
+    }
+}
+
+/// One recent transcript; clicking anywhere on it copies the text.
+private struct TranscriptRow: View {
+    let transcript: DictationController.Transcript
+    let onCopy: () -> Void
+
+    @State private var hovering = false
+    @State private var copied = false
+    @State private var copyCount = 0
+
+    var body: some View {
+        Button {
+            onCopy()
+            copied = true
+            copyCount += 1
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(transcript.text)
+                        .font(.callout)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(transcript.date, style: .relative)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.neon)
+                    .opacity(hovering || copied ? 1 : 0.35)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(hovering ? Theme.surfaceHover : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Copy to clipboard")
+        // Restarts on every click, so an older tap can't clear the checkmark of a newer one.
+        .task(id: copyCount) {
+            guard copyCount > 0 else { return }
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            copied = false
         }
     }
 }

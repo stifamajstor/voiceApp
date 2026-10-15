@@ -14,7 +14,18 @@ final class DictationController: ObservableObject {
         case error(String)
     }
 
+    /// A finished transcription, kept in memory only so it can be copied again from the menu.
+    struct Transcript: Identifiable, Equatable {
+        let id = UUID()
+        let text: String
+        let date: Date
+    }
+
     @Published private(set) var state: State = .idle
+    /// Newest first, capped at `historyLimit`. Not persisted.
+    @Published private(set) var recentTranscripts: [Transcript] = []
+
+    static let historyLimit = 5
 
     /// Recordings shorter than this are treated as accidental taps and dropped.
     static let minimumDuration: TimeInterval = 0.3
@@ -192,8 +203,14 @@ final class DictationController: ObservableObject {
             return
         }
 
+        recentTranscripts.insert(Transcript(text: text, date: .now), at: 0)
+        if recentTranscripts.count > Self.historyLimit {
+            recentTranscripts.removeLast(recentTranscripts.count - Self.historyLimit)
+        }
+
         do {
-            try await TextInserter.insert(text)
+            let keepOnClipboard = UserDefaults.standard.bool(forKey: TextInserter.keepOnClipboardKey)
+            try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
             state = .idle
         } catch {
             if case TextInserter.InsertError.accessibilityNotGranted = error,
@@ -209,6 +226,16 @@ final class DictationController: ObservableObject {
     private static func isNonSpeechMarker(_ text: String) -> Bool {
         guard let first = text.first, let last = text.last else { return true }
         return (first == "[" && last == "]") || (first == "(" && last == ")")
+    }
+
+    // MARK: History
+
+    func copyToClipboard(_ transcript: Transcript) {
+        TextInserter.copy(transcript.text)
+    }
+
+    func clearHistory() {
+        recentTranscripts.removeAll()
     }
 
     // MARK: Helpers
