@@ -176,6 +176,82 @@ public final class MemoryStore: Sendable {
         }
     }
 
+    @discardableResult
+    public func addTerm(text: String, aliases: [String] = []) throws -> DictionaryTerm {
+        try database.write { db in
+            try Self.validateTerm(text: text, aliases: aliases, excluding: nil, in: db)
+            let term = DictionaryTerm(text: text, aliases: aliases, deviceID: deviceID)
+            try term.insert(db)
+            return term
+        }
+    }
+
+    @discardableResult
+    public func updateTerm(id: UUID, text: String, aliases: [String]) throws -> DictionaryTerm {
+        try database.write { db in
+            guard var term = try DictionaryTerm.fetchOne(db,
+                sql: "SELECT * FROM dictionaryTerms WHERE id = ? AND deletedAt IS NULL",
+                arguments: [id.uuidString]) else { throw DictionaryError.termNotFound(id) }
+            try Self.validateTerm(text: text, aliases: aliases, excluding: id, in: db)
+            term.text = text
+            term.aliases = aliases
+            term.updatedAt = Self.nextTermDate(after: term.updatedAt)
+            term.deviceID = deviceID
+            try term.update(db)
+            return term
+        }
+    }
+
+    public func deleteTerm(id: UUID) throws {
+        try database.write { db in
+            guard var term = try DictionaryTerm.fetchOne(db,
+                sql: "SELECT * FROM dictionaryTerms WHERE id = ? AND deletedAt IS NULL",
+                arguments: [id.uuidString]) else { return }
+            term.updatedAt = Self.nextTermDate(after: term.updatedAt)
+            term.deletedAt = term.updatedAt
+            term.deviceID = deviceID
+            term.text = ""
+            term.aliases = []
+            try term.update(db)
+        }
+    }
+
+    public func listTerms() throws -> [DictionaryTerm] {
+        try database.read { db in
+            try DictionaryTerm.fetchAll(db,
+                sql: "SELECT * FROM dictionaryTerms WHERE deletedAt IS NULL ORDER BY id")
+        }
+    }
+
+    public func dictionaryTerm(id: UUID) throws -> DictionaryTerm? {
+        try database.read { db in
+            try DictionaryTerm.fetchOne(db, key: id.uuidString)
+        }
+    }
+
+    private static func nextTermDate(after previous: Date) -> Date {
+        // Keep rapid edits ordered even if the wall clock moves backwards.
+        Date(timeIntervalSince1970: max(Date.now.timeIntervalSince1970, previous.timeIntervalSince1970 + 0.000001))
+    }
+
+    private static func validateTerm(text: String, aliases: [String], excluding id: UUID?, in db: Database) throws {
+        guard !DictionaryTerm.matchKey(text).isEmpty else { throw DictionaryError.emptyText }
+        let existing = try DictionaryTerm.fetchAll(db,
+            sql: "SELECT * FROM dictionaryTerms WHERE deletedAt IS NULL ORDER BY id")
+        var owners: [String: UUID] = [:]
+        for term in existing where term.id != id {
+            for value in [term.text] + term.aliases {
+                let key = DictionaryTerm.matchKey(value)
+                if !key.isEmpty { owners[key] = owners[key] ?? term.id }
+            }
+        }
+        for value in [text] + aliases {
+            if let owner = owners[DictionaryTerm.matchKey(value)] {
+                throw DictionaryError.conflict(value: value, termID: owner)
+            }
+        }
+    }
+
     public func audioURL(for record: MemoryRecord) -> URL? {
         guard let path = record.audioPath,
               let ext = try? Self.validatedAudioExtension((path as NSString).pathExtension),
@@ -286,6 +362,21 @@ public final class MemoryStore: Sendable {
                 table.column("rawText")
                 table.column("finalText")
             }
+        }
+        migrator.registerMigration("dictionary.createTerms") { db in
+            try db.execute(sql: """
+                CREATE TABLE dictionaryTerms (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    text TEXT NOT NULL,
+                    aliases TEXT NOT NULL,
+                    updatedAt REAL NOT NULL,
+                    deviceID TEXT NOT NULL,
+                    deletedAt REAL,
+                    CHECK (typeof(updatedAt) IN ('real', 'integer')),
+                    CHECK (deletedAt IS NULL OR typeof(deletedAt) IN ('real', 'integer')),
+                    CHECK (deletedAt IS NULL OR (text = '' AND aliases = '[]'))
+                );
+                """)
         }
         return migrator
     }

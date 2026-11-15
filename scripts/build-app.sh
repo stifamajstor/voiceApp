@@ -41,6 +41,10 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 APP="$ROOT/build/$APP_NAME.app"
 
+# A half-built or rejected app must not be left where make-dmg.sh --skip-build would package it.
+# Disarmed once the app is verified and signed.
+trap '[[ $? -eq 0 ]] || rm -rf "$APP"' EXIT
+
 echo "==> Building (release, arm64)"
 # SwiftPM's executable accessor searches the app root, but signed macOS apps keep
 # resource bundles in Contents/Resources. Compile adjusted copies through an overlay.
@@ -108,6 +112,7 @@ fi
 codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --deep --strict "$APP"
 
+trap - EXIT
 echo "==> Built $APP"
 
 TARGET="$APP"
