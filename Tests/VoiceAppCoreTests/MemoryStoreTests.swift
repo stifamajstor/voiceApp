@@ -634,6 +634,28 @@ final class MemoryStoreTests: XCTestCase {
         try assertNoDeletedWords(in: Array(deletedWords), excluding: Array(liveWords), windowLength: 8)
     }
 
+    func testFreshStoreTruncatesFreePagesOnEveryCommit() throws {
+        XCTAssertEqual(try autoVacuumMode(), 1)
+        _ = try store.append(rawText: "first")
+        XCTAssertEqual(try autoVacuumMode(), 1)
+        try reopen()
+        XCTAssertEqual(try autoVacuumMode(), 1)
+        let second = try MemoryStore(directory: directory)
+        defer { try? second.close() }
+        XCTAssertEqual(try autoVacuumMode(), 1)
+    }
+
+    func testDeletesLeaveNoFreePages() throws {
+        let single = try (0..<40).map { _ in try store.append(rawText: String(repeating: "freepage filler ", count: 200)) }
+        let batch = try (0..<400).map { _ in try store.append(rawText: String(repeating: "batch filler ", count: 50)) }
+        try store.delete(id: single[0].id)
+        try store.delete(ids: batch.map(\.id) + single.dropFirst().map(\.id))
+        try store.close()
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        XCTAssertEqual(try database.read { try Int.fetchOne($0, sql: "PRAGMA freelist_count") }, 0)
+    }
+
     func testSchemaRejectsBlobKindsAndNoncanonicalDeviceIDs() throws {
         let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
         defer { try? database.close() }
@@ -736,6 +758,12 @@ final class MemoryStoreTests: XCTestCase {
             }
             XCTAssertTrue(retained.isEmpty, "Retained \(retained.count) deleted byte fragments in \(url.lastPathComponent)", file: file, line: line)
         }
+    }
+
+    private func autoVacuumMode() throws -> Int? {
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        return try database.read { try Int.fetchOne($0, sql: "PRAGMA auto_vacuum") }
     }
 
     private func reopen() throws {

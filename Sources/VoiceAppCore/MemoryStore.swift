@@ -37,7 +37,12 @@ public final class MemoryStore: Sendable {
         }
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
-        configuration.prepareDatabase { try $0.execute(sql: "PRAGMA secure_delete = ON") }
+        configuration.prepareDatabase { db in
+            // Only takes effect while the file is empty, so it must run before the first migration. FULL truncates
+            // free pages on every commit; a hot-journal rollback after a crash would not scrub reused free pages.
+            try db.execute(sql: "PRAGMA auto_vacuum = FULL")
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+        }
         database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path, configuration: configuration)
         try Self.migrator.migrate(database)
         deviceID = try database.read { db in
@@ -150,7 +155,7 @@ public final class MemoryStore: Sendable {
                 deleted = true
             }
             if deleted {
-                // Rebuilding also removes page-index prefixes that FTS5 secure deletion leaves behind.
+                // An FTS5 delete leaves the deleted words in the index until a rebuild.
                 try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS) VALUES('rebuild')")
             }
         }
