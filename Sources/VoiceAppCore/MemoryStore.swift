@@ -79,12 +79,12 @@ public final class MemoryStore: Sendable {
         }
     }
 
-    /// Matches all typed words literally, ignoring punctuation; results are newest first.
     public func search(_ query: String, kind: RecordKind? = nil, limit: Int = 50) throws -> [MemoryRecord] {
         guard limit > 0 else { return [] }
         return try database.read { db in
             let tokens = try db.makeTokenizer(.unicode61()).tokenize(query: query)
             guard !tokens.isEmpty else { return [] }
+            // Quoting tokens prevents typed text from becoming FTS operators or column selectors.
             let pattern = tokens.map { "\"" + $0.token.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
                 .joined(separator: " AND ")
             return try MemoryRecord.fetchAll(db, sql: """
@@ -115,7 +115,7 @@ public final class MemoryStore: Sendable {
                 do {
                     try FileManager.default.removeItem(at: url)
                 } catch CocoaError.fileNoSuchFile {
-                    // Retention or a previous interrupted delete may already have removed the file.
+                    // A missing file must not prevent retrying an interrupted deletion.
                 }
             }
             try db.execute(sql: """

@@ -14,7 +14,15 @@ Everything runs on-device. No accounts, no cloud.
 
 ## Stack
 
-- Swift Package (`Package.swift`), single executable target `VoiceApp`, `Sources/VoiceApp/`.
+- Swift Package (`Package.swift`): executable `VoiceApp` (`Sources/VoiceApp/`), plain logic library
+  `VoiceAppCore` (`Sources/VoiceAppCore/`), and `VoiceAppCoreTests` (`swift test`).
+- `VoiceAppCore.MemoryStore` uses GRDB/SQLite with FTS5 under
+  `~/Library/Application Support/VoiceApp/store/store.sqlite` (directory injectable for tests).
+  Immutable dictation/note/prompt records carry UUIDs and a database-persisted install ID.
+  Deletion clears all payload fields and audio, keeping only an ID/device ID/deletion timestamp tombstone.
+  Named migrations use descriptive feature-qualified names, registered in dependency order; do not number them.
+  Search matches all typed words literally across raw and final text, newest first.
+  The store is not connected to dictation yet; menu history remains in memory.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
   Hugging Face repo `argmaxinc/whisperkit-coreml`, load, transcribe. Sources are in
