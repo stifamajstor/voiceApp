@@ -73,6 +73,7 @@ public final class MemoryStore: Sendable {
 
     @discardableResult
     public func append(
+        id: UUID = UUID(),
         kind: RecordKind = .dictation,
         createdAt: Date = .now,
         rawText: String,
@@ -87,7 +88,6 @@ public final class MemoryStore: Sendable {
         if let durationSeconds, !durationSeconds.isFinite || durationSeconds < 0 {
             throw StoreError.invalidDuration
         }
-        let id = UUID()
         let audioPath = try audioExtension.map { "audio/\(id.uuidString).\(try Self.validatedAudioExtension($0))" }
         // Match the timestamp precision restored from SQLite's Unix-epoch REAL.
         let record = MemoryRecord(
@@ -100,6 +100,13 @@ public final class MemoryStore: Sendable {
         return try database.write { db in
             try record.insert(db)
             return record
+        }
+    }
+
+    public func count(kind: RecordKind) throws -> Int {
+        try database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM records WHERE kind = ? AND deletedAt IS NULL",
+                             arguments: [kind.rawValue]) ?? 0
         }
     }
 

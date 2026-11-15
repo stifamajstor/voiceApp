@@ -4,6 +4,7 @@ import VoiceAppCore
 
 @main
 struct VoiceApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var modelManager: ModelManager
     @StateObject private var dictation: DictationController
     @StateObject private var history: DictationHistory
@@ -20,6 +21,8 @@ struct VoiceApp: App {
         history.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
+        appDelegate.termination = HistoryTermination(history: history)
+        appDelegate.history = history
         // Register hotkeys once the app has finished launching and the run loop is up.
         Task { @MainActor in dictation.start() }
     }
@@ -91,4 +94,23 @@ struct MenuBarIcon: View {
         systemSymbolName: "waveform",
         accessibilityDescription: "Transcribing"
     )
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var termination: HistoryTermination?
+    var history: DictationHistory?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let mayQuit = termination?.requestTermination { [weak self] success in
+            sender.reply(toApplicationShouldTerminate: success)
+            if !success {
+                let alert = NSAlert()
+                alert.messageText = "Could not finish deleting dictation history"
+                alert.informativeText = self?.history?.deleteError ?? "Please retry the deletion before quitting."
+                alert.runModal()
+            }
+        } ?? true
+        return mayQuit ? .terminateNow : .terminateLater
+    }
 }

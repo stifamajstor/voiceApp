@@ -114,15 +114,22 @@ The database contains readable text; it is not encrypted by VoiceApp.
 
 Open **History…** from the menu to search, copy, or delete dictations. Results are newest first;
 the last search word matches prefixes. **Load more** shows results beyond the first 100.
-Use **⌘-click** or **⇧-click** to select several rows, then **Delete selected**. **Delete all…**
-asks for confirmation and deletes every saved dictation, including those outside the current search.
+Use **⌘-click** or **⇧-click** to select several rows, then **Delete selected** or press Delete.
+Every deletion asks for confirmation with the number of dictations to remove and is permanent.
+**Delete all…** includes dictations outside the current search and those queued before confirmation;
+dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
 Search and deletion run in the background with a busy indicator; large deletes can take seconds.
+Quitting from the menu or through macOS application termination (including logout and updater relaunch)
+waits for a running delete. A delete failure cancels quitting and shows the error. Force quit, a crash,
+or a forced system shutdown cannot wait for deletion.
 Copy a transcript and paste it into the intended app yourself.
 
 The menu keeps the latest three transcripts across relaunches when history is enabled. **Clear recent**
 hides the menu's current list for this launch; it does not delete stored history. New dictations still appear.
-Turning history off stops new saves and stops loading saved records into the menu; existing records stay
-available in History. If the store cannot open or a save fails, Settings → Behavior shows the reason,
+A dictation delivered while history is on is saved even if you turn it off while paste or storage is
+waiting. Turning history off stops saving dictations delivered from then on and stops loading saved
+records into the menu; existing records stay available in History. The menu explains the current saving
+setting and points to Settings → Behavior. If the store cannot open or a save fails, Settings → Behavior shows the reason,
 and dictation and paste continue. Recent transcripts remain available in memory for this launch.
 
 ## Troubleshooting

@@ -1,6 +1,7 @@
 import Foundation
 
 public struct CompletedDictation: Sendable {
+    public let id: UUID
     public let createdAt: Date
     public let rawText: String
     public let finalText: String
@@ -9,8 +10,9 @@ public struct CompletedDictation: Sendable {
     public let modelID: String
     public let durationSeconds: Double
 
-    public init(createdAt: Date = .now, rawText: String, finalText: String,
+    public init(id: UUID = UUID(), createdAt: Date = .now, rawText: String, finalText: String,
                 appBundleID: String?, appName: String?, modelID: String, durationSeconds: Double) {
+        self.id = id
         self.createdAt = createdAt
         self.rawText = rawText
         self.finalText = finalText
@@ -25,8 +27,15 @@ public protocol HistoryRepository: Sendable {
     func open() async throws
     func append(_ dictation: CompletedDictation) async throws -> MemoryRecord
     func records(query: String, limit: Int) async throws -> [MemoryRecord]
+    func count() async throws -> Int
     func delete(ids: [UUID]) async throws
     func deleteAll() async throws
+}
+
+extension HistoryRepository {
+    public func count() async throws -> Int {
+        try await records(query: "", limit: .max).count
+    }
 }
 
 /// Synchronous SQLite work stays on this actor, never on the UI actor.
@@ -43,8 +52,7 @@ public actor SQLiteHistoryRepository: HistoryRepository {
     }
 
     public func append(_ dictation: CompletedDictation) throws -> MemoryRecord {
-        try Task.checkCancellation()
-        return try availableStore().append(kind: .dictation, createdAt: dictation.createdAt,
+        return try availableStore().append(id: dictation.id, kind: .dictation, createdAt: dictation.createdAt,
             rawText: dictation.rawText, finalText: dictation.finalText,
             appBundleID: dictation.appBundleID, appName: dictation.appName,
             modelID: dictation.modelID, durationSeconds: dictation.durationSeconds)
@@ -55,6 +63,10 @@ public actor SQLiteHistoryRepository: HistoryRepository {
         return try query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? store.listRecent(kind: .dictation, limit: limit)
             : store.search(query, kind: .dictation, limit: limit)
+    }
+
+    public func count() throws -> Int {
+        try availableStore().count(kind: .dictation)
     }
 
     public func delete(ids: [UUID]) throws {

@@ -3,7 +3,7 @@ import VoiceAppCore
 
 struct HistoryView: View {
     @EnvironmentObject private var history: DictationHistory
-    @State private var showDeleteAllConfirmation = false
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -40,6 +40,7 @@ struct HistoryView: View {
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                             Text(record.finalText)
+                                .lineLimit(3)
                                 .font(.body)
                                 .foregroundStyle(Theme.textPrimary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -68,7 +69,8 @@ struct HistoryView: View {
                 }
             }
             .onDeleteCommand {
-                if !history.isSearching { Task { await history.deleteSelected() } }
+                history.requestDeleteSelected()
+                showDeleteConfirmation = history.needsDeleteSelectedConfirmation
             }
 
             HStack {
@@ -81,12 +83,13 @@ struct HistoryView: View {
                 }
                 Spacer()
                 Button("Delete selected (\(history.selection.count))", role: .destructive) {
-                    Task { await history.deleteSelected() }
+                    history.requestDeleteSelected()
+                    showDeleteConfirmation = history.needsDeleteSelectedConfirmation
                 }
                 .disabled(history.selection.isEmpty || history.isSearching || history.isDeleting)
                 Button("Delete all…", role: .destructive) {
                     history.requestDeleteAll()
-                    showDeleteAllConfirmation = history.needsDeleteAllConfirmation
+                    showDeleteConfirmation = history.needsDeleteAllConfirmation
                 }
                 .disabled(history.isOpening || history.isDeleting || history.storeError != nil)
             }
@@ -102,12 +105,24 @@ struct HistoryView: View {
         .foregroundStyle(Theme.textPrimary)
         .tint(Theme.neon)
         .preferredColorScheme(.dark)
-        .alert("Delete all dictation history?", isPresented: $showDeleteAllConfirmation) {
-            Button("Cancel", role: .cancel) { history.cancelDeleteAll() }
-            Button("Delete all", role: .destructive) { Task { await history.confirmDeleteAll() } }
+        .alert("Delete \(deleteCount) dictations?", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                history.cancelDeleteAll()
+                history.cancelDeleteSelected()
+            }
+            Button("Delete", role: .destructive) {
+                if history.needsDeleteAllConfirmation { history.confirmDeleteAll() }
+                else { history.deleteSelected() }
+            }
         } message: {
-            Text("This permanently deletes every saved dictation, including records outside the current search. This cannot be undone.")
+            Text(history.needsDeleteAllConfirmation
+                 ? "This permanently deletes \(deleteCount) dictations, including records outside the current search. This cannot be undone."
+                 : "This permanently deletes \(deleteCount) selected dictations. This cannot be undone.")
         }
+    }
+
+    private var deleteCount: Int {
+        history.needsDeleteAllConfirmation ? history.deleteAllCount : history.selectedDeleteCount
     }
 }
 

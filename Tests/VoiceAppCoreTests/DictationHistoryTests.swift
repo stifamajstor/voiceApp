@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import GRDB
 @testable import VoiceAppCore
@@ -84,7 +85,7 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertTrue(writes.isEmpty)
     }
 
-    func testSlowOpenNeverDelaysPasteAndDisabledPendingSaveIsDropped() async throws {
+    func testSlowOpenNeverDelaysPasteAndAcceptedSaveSurvivesDisabling() async throws {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setOpenGate(gate)
@@ -100,7 +101,7 @@ final class DictationHistoryTests: XCTestCase {
         await opening.value
         await history.pendingSave?.value
         let writes = await repository.writes
-        XCTAssertTrue(writes.isEmpty)
+        XCTAssertEqual(writes.map(\.finalText), ["final words"])
     }
 
     func testSlowSaveNeverDelaysPasteOrAnotherDictation() async throws {
@@ -120,7 +121,7 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertEqual(writes.map(\.finalText), ["first", "second"])
     }
 
-    func testDisablingHistoryRejectsASaveWaitingForTheStore() async throws {
+    func testDisablingHistoryKeepsAcceptedSaveWaitingForTheStore() async throws {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setSaveGate(gate)
@@ -132,7 +133,7 @@ final class DictationHistoryTests: XCTestCase {
         await gate.release()
         await history.pendingSave?.value
         let writes = await repository.writes
-        XCTAssertTrue(writes.isEmpty)
+        XCTAssertEqual(writes.map(\.finalText), ["final words"])
     }
 
     func testEnablingHistoryDuringPasteDoesNotSaveAPrivateDictation() async throws {
@@ -182,10 +183,13 @@ final class DictationHistoryTests: XCTestCase {
             await history.pendingSave?.value
         }
         XCTAssertEqual(history.recent.map(\.text), ["entry 4", "entry 3", "entry 2"])
+        await history.deliver(sample("queued")) { _ in }
         history.clearRecent()
+        await history.pendingSave?.value
+        await history.pendingSearch?.value
         await history.refreshRecent()
         XCTAssertTrue(history.recent.isEmpty)
-        XCTAssertEqual(try records().count, 5)
+        XCTAssertEqual(try records().count, 6)
         await history.deliver(sample("new")) { _ in }
         await history.pendingSave?.value
         XCTAssertEqual(history.recent.map(\.text), ["new"])
@@ -238,10 +242,13 @@ final class DictationHistoryTests: XCTestCase {
         await history.start().value
         history.query = "old"
         await fulfillment(of: [gate.entered], timeout: 2)
+        let older = history.pendingSearch
+        await repository.setSearchGate(nil)
         history.query = "new"
-        let newest = history.pendingSearch
+        await history.pendingSearch?.value
+        XCTAssertEqual(history.results.map(\.finalText), ["new"])
         await gate.release()
-        await newest?.value
+        await older?.value
         XCTAssertEqual(history.results.map(\.finalText), ["new"])
         XCTAssertFalse(history.isSearching)
     }
@@ -255,11 +262,13 @@ final class DictationHistoryTests: XCTestCase {
         history.selection = selected
         let gate = Suspension()
         await repository.setDeleteGate(gate)
-        let deletion = Task { await history.deleteSelected() }
+        history.requestDeleteSelected()
+        let deletion = Task { await history.deleteSelected()?.value }
         await fulfillment(of: [gate.entered], timeout: 2)
         XCTAssertTrue(history.isDeleting)
         XCTAssertEqual(history.results.count, 2)
-        await history.deleteSelected()
+        history.requestDeleteSelected()
+        await history.deleteSelected()?.value
         await gate.release()
         await deletion.value
         XCTAssertFalse(history.isDeleting)
@@ -279,13 +288,15 @@ final class DictationHistoryTests: XCTestCase {
         let before = history.results
         let selected = history.selection
         await repository.failDelete(true)
-        await history.deleteSelected()
+        history.requestDeleteSelected()
+        await history.deleteSelected()?.value
         XCTAssertEqual(history.results, before)
         XCTAssertEqual(history.selection, selected)
         XCTAssertEqual(history.deleteError, "Test failure")
         XCTAssertFalse(history.isDeleting)
         await repository.failDelete(false)
-        await history.deleteSelected()
+        history.requestDeleteSelected()
+        await history.deleteSelected()?.value
         XCTAssertEqual(history.results.count, 1)
         XCTAssertNil(history.deleteError)
     }
@@ -303,17 +314,19 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertTrue(history.hasMore)
         await history.loadMore()
         XCTAssertEqual(history.results.count, 105)
+        XCTAssertEqual(history.deleteAllCount, 105)
         history.query = "entry 1"
         await history.pendingSearch?.value
-        await history.confirmDeleteAll()
+        await history.confirmDeleteAll()?.value
         XCTAssertEqual(try records().count, 106)
         history.requestDeleteAll()
         history.cancelDeleteAll()
-        await history.confirmDeleteAll()
+        await history.confirmDeleteAll()?.value
         XCTAssertEqual(try records().count, 106)
         history.requestDeleteAll()
-        await history.confirmDeleteAll()
+        await history.confirmDeleteAll()?.value
         XCTAssertEqual(try records(), [note])
+        XCTAssertEqual(history.deleteAllCount, 0)
         XCTAssertTrue(history.results.isEmpty)
         XCTAssertTrue(history.recent.isEmpty)
         XCTAssertFalse(history.isDeleting)
@@ -328,9 +341,10 @@ final class DictationHistoryTests: XCTestCase {
         await repository.failDelete(true)
         let gate = Suspension()
         await repository.setSearchGate(gate)
+        history.requestDeleteSelected()
         history.query = "new search"
         await fulfillment(of: [gate.entered], timeout: 2)
-        await history.deleteSelected()
+        await history.deleteSelected()?.value
         XCTAssertEqual(history.deleteError, "Test failure")
         await gate.release()
         await history.pendingSearch?.value
@@ -373,6 +387,141 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertEqual(history.searchError, "Test failure")
     }
 
+    func testDeleteAllOrdersPendingSaveDeleteAndLaterSave() async throws {
+        try await assertDeleteOrdering(all: true)
+    }
+
+    func testSelectedDeleteOrdersPendingSaveDeleteAndLaterSave() async throws {
+        try await assertDeleteOrdering(all: false)
+    }
+
+    private func assertDeleteOrdering(all: Bool) async throws {
+        let repository = ControlledRepository()
+        let history = DictationHistory(repository: repository, defaults: defaults)
+        await history.start().value
+        await history.refresh()
+        history.selection = Set(history.results.map(\.id))
+        let saveGate = Suspension()
+        let deleteGate = Suspension()
+        await repository.setSaveGate(saveGate)
+        await repository.setDeleteGate(deleteGate)
+        await history.deliver(sample("before")) { _ in }
+        await fulfillment(of: [saveGate.entered], timeout: 2)
+        let deleting = expectation(description: "Delete accepted")
+        let observation = history.$isDeleting.filter { $0 }.prefix(1).sink { _ in deleting.fulfill() }
+        if all { history.requestDeleteAll() }
+        let deletion = Task {
+            if all { await history.confirmDeleteAll()?.value }
+            else {
+                history.requestDeleteSelected()
+                await history.deleteSelected()?.value
+            }
+        }
+        await fulfillment(of: [deleting], timeout: 2)
+        await history.deliver(sample("after")) { _ in }
+        let eventsWhileBlocked = await repository.events
+        XCTAssertTrue(eventsWhileBlocked.isEmpty)
+        await saveGate.release()
+        await fulfillment(of: [deleteGate.entered], timeout: 2)
+        let eventsBeforeDelete = await repository.events
+        XCTAssertEqual(eventsBeforeDelete, ["save:before", "delete"])
+        await deleteGate.release()
+        await deletion.value
+        await history.pendingSave?.value
+        let events = await repository.events
+        XCTAssertEqual(events, ["save:before", "delete", "save:after"])
+        let remaining = try await repository.records(query: "", limit: 100)
+        XCTAssertTrue(remaining.contains { $0.finalText == "after" })
+        XCTAssertTrue(history.recent.contains { $0.text == "after" })
+        if all {
+            XCTAssertEqual(remaining.map(\.finalText), ["after"])
+            XCTAssertEqual(history.deleteAllCount, 1)
+        }
+        withExtendedLifetime(observation) {}
+    }
+
+    func testDeletingPersistedDictationRemovesItFromMenu() async throws {
+        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), defaults: defaults)
+        await history.start().value
+        await history.deliver(sample("delete me")) { _ in }
+        await history.pendingSave?.value
+        await history.refresh()
+        let record = try XCTUnwrap(history.results.first)
+        XCTAssertEqual(history.recent.map(\.id), [record.id])
+        history.selection = [record.id]
+        history.requestDeleteSelected()
+        await history.deleteSelected()?.value
+        XCTAssertTrue(history.recent.isEmpty)
+        XCTAssertTrue(try records().isEmpty)
+    }
+
+    func testDisablingDuringPasteKeepsAcceptedDictationAndRejectsLaterOnes() async throws {
+        let repository = ControlledRepository()
+        let history = DictationHistory(repository: repository, defaults: defaults)
+        await history.start().value
+        await history.deliver(sample("accepted")) { _ in history.saveEnabled = false }
+        await history.deliver(sample("private")) { _ in }
+        await history.pendingSave?.value
+        let writes = await repository.writes
+        XCTAssertEqual(writes.map(\.finalText), ["accepted"])
+    }
+
+    func testTerminationWaitsForDeleteAndRepliesOnce() async throws {
+        try await assertTerminationWaits(deleteFails: false)
+    }
+
+    func testTerminationCancelsQuitWhenDeleteFails() async throws {
+        try await assertTerminationWaits(deleteFails: true)
+    }
+
+    private func assertTerminationWaits(deleteFails: Bool) async throws {
+        let repository = ControlledRepository()
+        let history = DictationHistory(repository: repository, defaults: defaults)
+        await history.start().value
+        let termination = HistoryTermination(history: history)
+        XCTAssertTrue(termination.requestTermination { _ in XCTFail("No asynchronous reply needed") })
+        let gate = Suspension()
+        await repository.setDeleteGate(gate)
+        await repository.failDelete(deleteFails)
+        history.requestDeleteAll()
+        let deletion = Task { await history.confirmDeleteAll()?.value }
+        await fulfillment(of: [gate.entered], timeout: 2)
+        let replied = expectation(description: "Termination replied after deletion")
+        var replies: [Bool] = []
+        XCTAssertFalse(termination.requestTermination {
+            replies.append($0)
+            replied.fulfill()
+        })
+        XCTAssertFalse(termination.requestTermination { _ in XCTFail("Duplicate quit request") })
+        XCTAssertTrue(replies.isEmpty)
+        await gate.release()
+        await deletion.value
+        await fulfillment(of: [replied], timeout: 2)
+        XCTAssertEqual(replies, [!deleteFails])
+        XCTAssertFalse(history.isDeleting)
+    }
+
+    func testSelectedDeletionRequiresConfirmationAndCancelKeepsRecords() async throws {
+        let repository = ControlledRepository()
+        let history = DictationHistory(repository: repository, defaults: defaults)
+        await history.start().value
+        await history.refresh()
+        history.selection = [try XCTUnwrap(history.results.first).id]
+        await history.deleteSelected()?.value
+        let batches = await repository.deletedBatches
+        XCTAssertTrue(batches.isEmpty)
+        XCTAssertEqual(history.results.count, 2)
+        history.requestDeleteSelected()
+        XCTAssertEqual(history.selectedDeleteCount, 1)
+        history.cancelDeleteSelected()
+        await history.deleteSelected()?.value
+        XCTAssertEqual(history.results.count, 2)
+        history.requestDeleteSelected()
+        history.selection = []
+        await history.deleteSelected()?.value
+        XCTAssertEqual(history.results.count, 1)
+    }
+
     private func sample(_ text: String = "final words") -> CompletedDictation {
         CompletedDictation(createdAt: Date(timeIntervalSince1970: 200), rawText: "raw \(text)", finalText: text,
                            appBundleID: "com.apple.TextEdit", appName: "TextEdit", modelID: "selected-model", durationSeconds: 2.5)
@@ -411,6 +560,7 @@ private actor Suspension {
 }
 
 private actor ControlledRepository: HistoryRepository {
+    var events: [String] = []
     var writes: [CompletedDictation] = []
     var queries: [String] = []
     var deletedBatches: [[UUID]] = []
@@ -430,7 +580,7 @@ private actor ControlledRepository: HistoryRepository {
     func failDelete(_ value: Bool) { deleteFails = value }
     func setOpenGate(_ gate: Suspension) { openGate = gate }
     func setSaveGate(_ gate: Suspension) { saveGate = gate }
-    func setSearchGate(_ gate: Suspension) { searchGate = gate }
+    func setSearchGate(_ gate: Suspension?) { searchGate = gate }
     func setDeleteGate(_ gate: Suspension) { deleteGate = gate }
     func resetQueries() { queries = [] }
 
@@ -443,8 +593,9 @@ private actor ControlledRepository: HistoryRepository {
         await saveGate?.enter()
         try Task.checkCancellation()
         if saveFails { throw TestFailure() }
+        events.append("save:\(dictation.finalText)")
         writes.append(dictation)
-        let saved = Self.record(dictation.finalText)
+        let saved = Self.record(dictation.finalText, id: dictation.id)
         entries.insert(saved, at: 0)
         return saved
     }
@@ -457,6 +608,7 @@ private actor ControlledRepository: HistoryRepository {
     }
 
     func delete(ids: [UUID]) async throws {
+        events.append("delete")
         await deleteGate?.enter()
         if deleteFails { throw TestFailure() }
         deletedBatches.append(ids)
@@ -464,13 +616,14 @@ private actor ControlledRepository: HistoryRepository {
     }
 
     func deleteAll() async throws {
+        events.append("delete")
         await deleteGate?.enter()
         if deleteFails { throw TestFailure() }
         entries = []
     }
 
-    private static func record(_ text: String) -> MemoryRecord {
-        MemoryRecord(id: UUID(), deviceID: UUID(), kind: .dictation, createdAt: .now, rawText: text, finalText: text,
+    private static func record(_ text: String, id: UUID = UUID()) -> MemoryRecord {
+        MemoryRecord(id: id, deviceID: UUID(), kind: .dictation, createdAt: .now, rawText: text, finalText: text,
                      appBundleID: nil, appName: nil, project: nil, modelID: nil, durationSeconds: nil,
                      audioPath: nil, deletedAt: nil)
     }

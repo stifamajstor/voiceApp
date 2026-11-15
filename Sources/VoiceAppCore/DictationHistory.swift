@@ -15,8 +15,6 @@ public final class DictationHistory: ObservableObject {
         didSet {
             guard saveEnabled != oldValue else { return }
             defaults.set(saveEnabled, forKey: Self.saveEnabledKey)
-            saveGeneration += 1
-            if !saveEnabled { saveTasks.values.forEach { $0.cancel() } }
             updateRecent()
             if saveEnabled { Task { await refreshRecent() } }
         }
@@ -32,6 +30,13 @@ public final class DictationHistory: ObservableObject {
     @Published public private(set) var searchError: String?
     @Published public private(set) var hasMore = false
     @Published public private(set) var needsDeleteAllConfirmation = false
+    @Published public private(set) var needsDeleteSelectedConfirmation = false
+    @Published private var storedCount = 0
+    @Published private var pendingDictations: Set<UUID> = []
+    private var selectedDeletionIDs: Set<UUID> = []
+
+    public var selectedDeleteCount: Int { selectedDeletionIDs.count }
+    public var deleteAllCount: Int { storedCount + pendingDictations.count }
     @Published public var selection: Set<UUID> = []
     @Published public var query = "" {
         didSet {
@@ -47,12 +52,11 @@ public final class DictationHistory: ObservableObject {
     private let log: (String) -> Void
     private var openingTask: Task<Void, Never>?
     private(set) var pendingSave: Task<Void, Never>?
+    public private(set) var pendingDeletion: Task<Void, Never>?
     private(set) var pendingSearch: Task<Void, Never>?
-    private var saveTasks: [UUID: Task<Void, Never>] = [:]
     private var sessionRecent: [Recent] = []
     private var storedRecent: [Recent] = []
     private var includeStoredRecent = true
-    private var saveGeneration = 0
     private var searchGeneration = 0
     private var recentGeneration = 0
     private var resultLimit = pageSize
@@ -75,6 +79,7 @@ public final class DictationHistory: ObservableObject {
         let task = Task {
             do {
                 try await repository.open()
+                storedCount = try await repository.count()
                 isOpening = false
                 await refreshRecent()
             } catch {
@@ -89,44 +94,38 @@ public final class DictationHistory: ObservableObject {
 
     /// Paste completes independently of opening, saving, searching, or deleting history.
     public func deliver(_ dictation: CompletedDictation, paste: (String) async throws -> Void) async rethrows {
-        let entry = Recent(id: UUID(), text: dictation.finalText, date: dictation.createdAt)
+        let entry = Recent(id: dictation.id, text: dictation.finalText, date: dictation.createdAt)
         sessionRecent.insert(entry, at: 0)
         sessionRecent = Array(sessionRecent.prefix(3))
         updateRecent()
         let enabled = saveEnabled
-        let generation = saveGeneration
         defer {
-            if enabled { save(dictation, recentID: entry.id, generation: generation) }
+            if enabled { save(dictation) }
         }
         try await paste(dictation.finalText)
     }
 
-    private func save(_ dictation: CompletedDictation, recentID: UUID, generation: Int) {
-        guard saveEnabled, generation == saveGeneration else { return }
-        let taskID = UUID()
+    private func save(_ dictation: CompletedDictation) {
+        pendingDictations.insert(dictation.id)
         let previous = pendingSave
         let opening = start()
         pendingSave = Task {
-            defer { saveTasks[taskID] = nil }
+            defer { pendingDictations.remove(dictation.id) }
             await previous?.value
             await opening.value
-            guard !Task.isCancelled, saveEnabled, generation == saveGeneration, storeError == nil else { return }
+            guard storeError == nil else { return }
             do {
-                let record = try await repository.append(dictation)
-                if let index = sessionRecent.firstIndex(where: { $0.id == recentID }) {
-                    sessionRecent[index] = Self.recent(record)
-                }
+                _ = try await repository.append(dictation)
+                storedCount += 1
+                pendingDictations.remove(dictation.id)
                 saveError = nil
                 await refreshRecent()
                 requestSearch(debounced: false)
-            } catch is CancellationError {
-                // Turning history off cancels saves that have not started their SQLite transaction.
             } catch {
                 saveError = error.localizedDescription
                 log("Could not save dictation history: \(error.localizedDescription)")
             }
         }
-        saveTasks[taskID] = pendingSave
     }
 
     public func clearRecent() {
@@ -205,14 +204,29 @@ public final class DictationHistory: ObservableObject {
         }
     }
 
-    public func deleteSelected() async {
-        let ids = selection.intersection(results.map(\.id))
-        guard !ids.isEmpty else { return }
-        await delete(ids: Array(ids))
+    public func requestDeleteSelected() {
+        guard !isDeleting, !isSearching, !isOpening, storeError == nil else { return }
+        cancelDeleteAll()
+        selectedDeletionIDs = selection.intersection(results.map(\.id))
+        needsDeleteSelectedConfirmation = !selectedDeletionIDs.isEmpty
+    }
+
+    public func cancelDeleteSelected() {
+        needsDeleteSelectedConfirmation = false
+        selectedDeletionIDs = []
+    }
+
+    @discardableResult
+    public func deleteSelected() -> Task<Void, Never>? {
+        guard needsDeleteSelectedConfirmation else { return nil }
+        let ids = Array(selectedDeletionIDs)
+        cancelDeleteSelected()
+        return delete(ids: ids)
     }
 
     public func requestDeleteAll() {
         guard !isDeleting, !isOpening, storeError == nil else { return }
+        cancelDeleteSelected()
         needsDeleteAllConfirmation = true
     }
 
@@ -220,32 +234,44 @@ public final class DictationHistory: ObservableObject {
         needsDeleteAllConfirmation = false
     }
 
-    public func confirmDeleteAll() async {
-        guard needsDeleteAllConfirmation else { return }
+    @discardableResult
+    public func confirmDeleteAll() -> Task<Void, Never>? {
+        guard needsDeleteAllConfirmation else { return nil }
         needsDeleteAllConfirmation = false
-        await delete(ids: nil)
+        return delete(ids: nil)
     }
 
-    private func delete(ids: [UUID]?) async {
-        guard !isDeleting, !isOpening, storeError == nil else { return }
+    private func delete(ids: [UUID]?) -> Task<Void, Never>? {
+        guard !isDeleting, !isOpening, storeError == nil else { return nil }
         isDeleting = true
         deleteError = nil
-        defer { isDeleting = false }
-        // Drain accepted saves so deleting history cannot be undone by an older pending save.
-        await pendingSave?.value
-        do {
-            if let ids { try await repository.delete(ids: ids) }
-            else { try await repository.deleteAll() }
-            let deletedIDs = ids.map(Set.init)
-            sessionRecent.removeAll { deletedIDs?.contains($0.id) ?? true }
-            storedRecent.removeAll { deletedIDs?.contains($0.id) ?? true }
-            selection = []
-            updateRecent()
-            await refreshRecent()
-            await refresh()
-        } catch {
-            deleteError = error.localizedDescription
-            log("Could not delete dictation history: \(error.localizedDescription)")
+        let previous = pendingSave
+        let recentIDs = Set(sessionRecent.map(\.id))
+        let deletion = Task {
+            defer {
+                isDeleting = false
+                pendingDeletion = nil
+            }
+            await previous?.value
+            do {
+                if let ids { try await repository.delete(ids: ids) }
+                else { try await repository.deleteAll() }
+                storedCount = ids.map { max(0, storedCount - $0.count) } ?? 0
+                let deletedIDs = ids.map(Set.init) ?? recentIDs
+                sessionRecent.removeAll { deletedIDs.contains($0.id) }
+                storedRecent.removeAll { ids == nil || deletedIDs.contains($0.id) }
+                selection = []
+                updateRecent()
+                await refreshRecent()
+                await refresh()
+            } catch {
+                deleteError = error.localizedDescription
+                log("Could not delete dictation history: \(error.localizedDescription)")
+            }
         }
+        // Later saves must follow the delete, including its menu refresh.
+        pendingSave = deletion
+        pendingDeletion = deletion
+        return deletion
     }
 }

@@ -120,6 +120,12 @@ struct MenuBarView: View {
                 }
             }
 
+            Text(history.saveEnabled
+                 ? "Dictations are saved on this Mac. Turn off in Settings → Behavior."
+                 : "New dictations are not saved. Turn on in Settings → Behavior.")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+
             Toggle("Keep on clipboard after paste", isOn: $keepOnClipboard)
                 .toggleStyle(.switch)
                 .controlSize(.mini)

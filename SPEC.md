@@ -45,14 +45,20 @@ Everything runs on-device. No accounts, no cloud.
   pagination, and deletion state in `VoiceAppCore`. Paste never awaits store operations. Open/save failures
   are logged and shown in Settings → Behavior. Completed transcriptions, including clipboard fallback,
   save raw/final text, timestamp, app bundle ID/name captured before paste, selected model ID, and duration.
-  Audio is not retained. Turning history off stops new saves without deleting existing history.
+  Audio is not retained. A dictation delivered while saving is enabled remains queued when the setting
+  is turned off; dictations delivered from then on are not saved. Existing history is kept.
 - The menu's latest three dictations survive relaunch with history enabled. **Clear recent** only hides
-  the menu list for the current launch; new dictations still appear. Only the history window deletes records.
+  the menu list for the current launch; new dictations still appear. The menu explains whether new
+  dictations are saved on this Mac and points to Settings → Behavior. Only the history window deletes records.
 - **History…** opens a window on demand, styled with `Theme.swift`. Search is debounced by 250 ms and uses
   the store's last-token prefix matching. Results are newest first, initially 100 with **Load more**, showing
-  date, app name, and final text. Each row has Copy; selected records use one batch delete. **Delete all…**
-  requires confirmation and deletes all dictations, irrespective of search or pagination. Searches and deletes
-  run off the main thread with busy/error states. Copy is supported; re-paste is outside this slice.
+  date, app name, and up to three lines of final text. Copy copies the full transcript. Every delete,
+  including the Delete key, requires confirmation with a count; selected records use one batch delete.
+  **Delete all…** removes saved or queued dictations before confirmation, irrespective of search or
+  pagination. Later deliveries survive. Deletes join the save queue and run off the main thread with
+  busy/error states. Application termination waits for running deletes, including menu Quit, logout,
+  and updater relaunch; failure cancels quitting and displays the error. Force quit, crashes, and forced
+  shutdown cannot wait. Copy is supported; re-paste is outside this slice.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
   Hugging Face repo `argmaxinc/whisperkit-coreml`, load, transcribe. Sources are in
