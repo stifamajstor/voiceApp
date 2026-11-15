@@ -1,10 +1,16 @@
 import Foundation
 import GRDB
 
-public enum RecordKind: String, Codable, Sendable {
-    case dictation
-    case note
-    case prompt
+public struct RecordKind: RawRepresentable, Codable, Hashable, Sendable, DatabaseValueConvertible {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let dictation = RecordKind(rawValue: "dictation")
+    public static let note = RecordKind(rawValue: "note")
+    public static let prompt = RecordKind(rawValue: "prompt")
 }
 
 public struct MemoryRecord: Identifiable, Codable, Equatable, Sendable {

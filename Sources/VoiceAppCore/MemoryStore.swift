@@ -1,12 +1,14 @@
 import Darwin
 import Foundation
 import GRDB
+import SQLite3
 
 public final class MemoryStore: Sendable {
     public enum StoreError: Error, Equatable {
         case invalidAudioExtension
         case invalidDuration
         case missingDeviceID
+        case migrationLockTimeout
     }
 
     public static var defaultDirectory: URL {
@@ -26,9 +28,13 @@ public final class MemoryStore: Sendable {
             O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
         guard migrationLock >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { Darwin.close(migrationLock) }
-        while flock(migrationLock, LOCK_EX) != 0 {
-            if errno == EINTR { continue }
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while flock(migrationLock, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK || errno == EINTR else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            guard ContinuousClock.now < deadline else { throw StoreError.migrationLockTimeout }
+            Thread.sleep(forTimeInterval: 0.01)
         }
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
@@ -37,6 +43,12 @@ public final class MemoryStore: Sendable {
         }
         database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path, configuration: configuration)
         try Self.migrator.migrate(database)
+        if sqlite3_libversion_number() >= 3_042_000 {
+            // Configure on every open so stores created before an OS upgrade also scrub FTS entries.
+            try database.write { db in
+                try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS, rank) VALUES('secure-delete', 1)")
+            }
+        }
         deviceID = try database.read { db in
             guard let id = try UUID.fetchOne(db, sql: "SELECT deviceID FROM storeMetadata WHERE singleton = 1")
             else { throw StoreError.missingDeviceID }
@@ -141,15 +153,18 @@ public final class MemoryStore: Sendable {
                     durationSeconds = NULL, audioPath = NULL, deletedAt = ?
                 WHERE id = ?
                 """, arguments: [Date.now.timeIntervalSince1970, id.uuidString])
-            // Older macOS 14 SQLite lacks FTS5 secure-delete; merge away its deletion markers.
-            try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS) VALUES('optimize')")
+            if sqlite3_libversion_number() < 3_042_000 {
+                // Older FTS5 retains deleted tokens in live segments; only rebuilding reliably removes them.
+                try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS) VALUES('rebuild')")
+            }
         }
     }
 
     public func audioURL(for record: MemoryRecord) throws -> URL? {
-        guard let path = record.audioPath else { return nil }
-        let ext = try Self.validatedAudioExtension((path as NSString).pathExtension)
-        return directory.appending(path: "audio/\(record.id.uuidString).\(ext)")
+        guard let path = record.audioPath,
+              let ext = try? Self.validatedAudioExtension((path as NSString).pathExtension),
+              path == "audio/\(record.id.uuidString).\(ext)" else { return nil }
+        return directory.appending(path: path)
     }
 
     private static func validatedAudioExtension(_ value: String) throws -> String {
@@ -193,7 +208,13 @@ public final class MemoryStore: Sendable {
                     deviceID TEXT NOT NULL
                 );
                 CREATE TABLE records (
-                    id TEXT PRIMARY KEY NOT NULL,
+                    id TEXT PRIMARY KEY NOT NULL CHECK (
+                        typeof(id) = 'text' AND length(CAST(id AS BLOB)) = 36
+                        AND length(replace(id, '-', '')) = 32
+                        AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
+                        AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
+                        AND id NOT GLOB '*[^0-9A-F-]*'
+                    ),
                     deviceID TEXT NOT NULL,
                     kind TEXT,
                     createdAt REAL,
@@ -215,6 +236,15 @@ public final class MemoryStore: Sendable {
                             AND durationSeconds IS NULL AND audioPath IS NULL)
                     )
                 );
+                CREATE TRIGGER records_no_replace BEFORE INSERT ON records
+                WHEN EXISTS (SELECT 1 FROM records WHERE id = NEW.id OR rowid = NEW.rowid)
+                BEGIN
+                    SELECT RAISE(ABORT, 'records cannot be replaced');
+                END;
+                CREATE TRIGGER records_no_delete BEFORE DELETE ON records
+                BEGIN
+                    SELECT RAISE(ABORT, 'records must be retained as tombstones');
+                END;
                 CREATE TRIGGER records_immutable BEFORE UPDATE ON records
                 WHEN OLD.deletedAt IS NOT NULL OR NEW.deletedAt IS NULL
                     OR NEW.id IS NOT OLD.id OR NEW.deviceID IS NOT OLD.deviceID

@@ -19,14 +19,23 @@ Everything runs on-device. No accounts, no cloud.
 - `VoiceAppCore.MemoryStore` uses GRDB/SQLite with FTS5 under
   `~/Library/Application Support/VoiceApp/store/store.sqlite` (directory injectable for tests).
   Immutable dictation/note/prompt records carry UUIDs and a database-persisted install ID.
-  The schema permits only a live-to-tombstone update; tombstones cannot be updated. Swift validates record kinds
-  and rejects negative or non-finite durations. Audio locations are derived from the record UUID and an optional
-  1–10 character ASCII alphanumeric extension, exposed by `audioURL(for:)`.
+  The schema requires canonical uppercase, hyphenated record UUIDs and permits only a live-to-tombstone update;
+  tombstones cannot be updated, rows cannot be deleted, and inserts cannot replace existing IDs or rowids.
+  A future migration that backfills or purges records must drop and recreate these protective triggers.
+  Kinds are open string-backed values with named dictation/note/prompt constants; unknown kinds remain readable
+  and round-trip unchanged for future sync. Swift rejects negative or non-finite durations. Audio locations
+  are derived from the record UUID and an optional 1–10 character ASCII alphanumeric extension,
+  exposed by `audioURL(for:)`.
   Deletion clears all payload fields and audio, keeping only an ID/device ID/deletion timestamp tombstone.
-  Audio symlinks are never followed; unexpected objects do not block tombstoning, while a file removal failure
-  leaves the record live for retry. Connections use a five-second busy timeout and `PRAGMA secure_delete = ON`.
-  A database-local file lock serializes migrations across first opens.
-  FTS optimization after deletion scrubs deleted tokens without requiring FTS5 secure-delete (SQLite 3.42+).
+  Audio symlinks are never followed; stored paths the store could not have produced and unexpected objects
+  do not block tombstoning, while a file removal failure leaves the record live for retry. Connections use
+  a five-second busy timeout and `PRAGMA secure_delete = ON`.
+  A database-local non-blocking file lock serializes migrations, with a five-second deadline and typed
+  `StoreError.migrationLockTimeout` error. Every open on SQLite 3.42+ enables FTS5 `secure-delete` after migrations,
+  so an OS upgrade enables scrubbing for existing databases too. Older SQLite rebuilds FTS inside each delete
+  transaction. Deleted text is removed from store files after close, excluding filesystem snapshots and backups.
+  FTS5 secure deletion can make the index unreadable by SQLite older than 3.42; a rebuild on a newer runtime
+  is required before downgrading.
   Named migrations use descriptive feature-qualified names, registered in dependency order; do not number them.
   Search quotes Unicode tokens across raw and final text, with only the last token treated as a prefix.
   Listing and search order by creation time descending, then insertion order descending.
