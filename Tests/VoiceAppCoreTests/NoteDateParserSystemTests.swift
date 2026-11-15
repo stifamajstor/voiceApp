@@ -3,13 +3,17 @@ import VoiceAppCore
 import XCTest
 
 /// The parser together with the real NSDataDetector. The detector reads the system clock, so each test starts from
-/// the real "now" and derives its expectations from it (see SystemDateScannerTests).
-final class NoteDateParserSystemTests: XCTestCase {
+/// the real "now" and derives its expectations from it. It also reads the process time zone and preferred
+/// languages, which each parse switches to those of the user in the test (see SystemDateScannerTests).
+final class NoteDateParserSystemTests: ProcessSettingsTestCase {
     private typealias Support = NoteTestSupport
     private let parser = NoteDateParser()
 
-    private func parse(_ text: String, at now: Date, in zone: TimeZone, locale: String = "en_US") -> ParsedNote {
-        parser.parse(text, reference: now, calendar: Support.calendar(zone), locale: Locale(identifier: locale))
+    /// Parses as a user in `zone` whose preferred language is `language` would.
+    private func parse(_ text: String, at now: Date, in zone: TimeZone, language: String = "en_US") -> ParsedNote {
+        ProcessSettings.asUser(in: zone, speaking: language) {
+            parser.parse(text, reference: now, calendar: Support.calendar(zone))
+        }
     }
 
     private func day(_ offset: Int, from now: Date, in zone: TimeZone, hour: Int? = nil, minute: Int? = nil) -> DateComponents {
@@ -131,7 +135,7 @@ final class NoteDateParserSystemTests: XCTestCase {
     func testGermanAndCroatianKeepTheDayAndLoseTheClock() throws {
         let zone = Support.berlin
         let now = try Support.nowAwayFromMidnight(in: zone)
-        let rows: [(text: String, locale: String, matched: String?, offset: Int)] = [
+        let rows: [(text: String, language: String, matched: String?, offset: Int)] = [
             ("Anna anrufen morgen um 9", "de_DE", "morgen um 9", 1),
             ("Anna anrufen übermorgen", "de_DE", "übermorgen", 2),
             ("Anna anrufen in 3 Tagen", "de_DE", "in 3 Tagen", 3),
@@ -140,12 +144,12 @@ final class NoteDateParserSystemTests: XCTestCase {
             ("nazvati Annu za 3 dana", "hr_HR", "za 3 dana", 3),
         ]
         for row in rows {
-            let draft = parse(row.text, at: now, in: zone, locale: row.locale).draft
+            let draft = parse(row.text, at: now, in: zone, language: row.language).draft
             XCTAssertEqual(draft?.matchedText, row.matched, row.text)
             XCTAssertEqual(draft?.start, day(row.offset, from: now, in: zone), row.text)
         }
-        // Croatian under an English locale: the detector finds only a clock time, which is never enough.
-        XCTAssertNil(parse("nazvati Annu sutra u 10:30", at: now, in: zone, locale: "en_US").draft)
+        // Croatian with English as the language: the detector finds only a clock time, which is never enough.
+        XCTAssertNil(parse("nazvati Annu sutra u 10:30", at: now, in: zone, language: "en_US").draft)
     }
 
     func testReferenceThatIsNotNowGivesNoDraft() throws {
@@ -154,5 +158,13 @@ final class NoteDateParserSystemTests: XCTestCase {
         for offset: TimeInterval in [-86_400, -3_600, 3_600, 86_400 * 7] {
             XCTAssertNil(parse("Call Anna tomorrow at 9", at: now + offset, in: zone).draft, "\(offset)")
         }
+    }
+
+    func testCalendarInAnotherZoneThanTheSystemGivesNoDraft() throws {
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
+        let draft = ProcessSettings.asUser(in: Support.berlin) {
+            parser.parse("Call Anna tomorrow at 9", reference: now, calendar: Support.calendar(Support.losAngeles)).draft
+        }
+        XCTAssertNil(draft)
     }
 }

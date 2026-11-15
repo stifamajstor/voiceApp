@@ -5,7 +5,6 @@ enum NoteTestSupport {
     static let berlin = TimeZone(identifier: "Europe/Berlin")!
     static let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
     static let auckland = TimeZone(identifier: "Pacific/Auckland")!
-    static let en = Locale(identifier: "en_US")
 
     static func calendar(_ timeZone: TimeZone) -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
@@ -37,5 +36,28 @@ enum NoteTestSupport {
         try XCTSkipIf(now.timeIntervalSince(midnight) < 300 || nextMidnight.timeIntervalSince(now) < 300,
             "Within five minutes of midnight in \(timeZone.identifier)")
         return now
+    }
+}
+
+/// A value shared with `@Sendable` closures, for counting calls in tests.
+final class Locked<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+
+    init(_ value: Value) { stored = value }
+
+    var value: Value {
+        lock.lock(); defer { lock.unlock() }
+        return stored
+    }
+}
+
+extension Locked where Value == Int {
+    /// Adds one and returns the new count.
+    @discardableResult
+    func increment() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        stored += 1
+        return stored
     }
 }

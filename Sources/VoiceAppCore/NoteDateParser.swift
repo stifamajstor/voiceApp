@@ -4,9 +4,12 @@ import Foundation
 ///
 /// Dates come from a `DateScanner` (by default `NSDataDetector`). The parser's job is to distrust it: a draft with
 /// a wrong date is worse than no draft, so anything unclear yields `draft == nil`. Nothing here reads the current
-/// date, zone or locale: `reference`, `calendar` (Gregorian only, its time zone is the wall-clock zone) and
-/// `locale` are arguments. The default scanner can only resolve against the system clock, so with it `reference`
-/// must be "now" (see `SystemDateScanner`); tests inject a scripted scanner instead.
+/// date or zone: `reference` and `calendar` (Gregorian only, its time zone is the wall-clock zone) are arguments,
+/// and every rule below is evaluated against them. The parser takes no language: the default scanner reads the
+/// user's preferred languages from the system itself, and the rules that read words ("every", "remind me to") are
+/// English. The default scanner can only resolve against the system clock and zone, so with it the caller passes
+/// the current time as `reference` and the system's own calendar, and gets no draft otherwise (see
+/// `SystemDateScanner`); tests inject a scripted scanner instead.
 ///
 /// **Reminder or event.** A date makes a reminder. An event needs a clock time as well, plus either a time span in
 /// the phrase ("from 3pm to 4pm") or the note naming a meeting, appointment or "call with" someone. "Call mom
@@ -46,19 +49,19 @@ public struct NoteDateParser: Sendable {
         self.scanner = scanner
     }
 
-    /// `reference` is the moment the note was dictated; see the type documentation for what it must be.
-    public func parse(_ text: String, reference: Date, calendar: Calendar, locale: Locale) -> ParsedNote {
-        ParsedNote(text: text, draft: draft(for: text, reference: reference, calendar: calendar, locale: locale))
+    /// `reference` is the moment the note was dictated; see the type documentation for what it and `calendar` must be.
+    public func parse(_ text: String, reference: Date, calendar: Calendar) -> ParsedNote {
+        ParsedNote(text: text, draft: draft(for: text, reference: reference, calendar: calendar))
     }
 
     private static let wallUnits: Set<Calendar.Component> = [.year, .month, .day, .hour, .minute, .second]
 
-    private func draft(for text: String, reference: Date, calendar: Calendar, locale: Locale) -> NoteDraft? {
+    private func draft(for text: String, reference: Date, calendar: Calendar) -> NoteDraft? {
         guard calendar.identifier == .gregorian,
               text.utf16.count <= Self.maximumNoteLength,
               !text.allSatisfy(\.isWhitespace)
         else { return nil }
-        let found = scanner.scan(text, reference: reference, timeZone: calendar.timeZone, locale: locale)
+        let found = scanner.scan(text, reference: reference, timeZone: calendar.timeZone)
         guard let hit = found.first,
               found.allSatisfy({ $0.date == hit.date && $0.duration == hit.duration && Self.isUsablePhrase(text[$0.range], $0) })
         else { return nil }

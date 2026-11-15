@@ -21,17 +21,17 @@ final class NoteDateParserTests: XCTestCase {
 
         let hits: [Hit]
         private let lock = NSLock()
-        private var seen: [(text: String, reference: Date, timeZone: TimeZone, locale: Locale)] = []
+        private var seen: [(text: String, reference: Date, timeZone: TimeZone)] = []
 
         init(_ hits: [Hit]) { self.hits = hits }
 
-        var calls: [(text: String, reference: Date, timeZone: TimeZone, locale: Locale)] {
+        var calls: [(text: String, reference: Date, timeZone: TimeZone)] {
             lock.lock(); defer { lock.unlock() }
             return seen
         }
 
-        func scan(_ text: String, reference: Date, timeZone: TimeZone, locale: Locale) -> [ScannedDate] {
-            lock.lock(); seen.append((text, reference, timeZone, locale)); lock.unlock()
+        func scan(_ text: String, reference: Date, timeZone: TimeZone) -> [ScannedDate] {
+            lock.lock(); seen.append((text, reference, timeZone)); lock.unlock()
             return hits.compactMap { hit in
                 guard let range = text.range(of: hit.phrase) else { return nil }
                 return ScannedDate(
@@ -54,7 +54,6 @@ final class NoteDateParserTests: XCTestCase {
         var name: String
         var now: String
         var zone: TimeZone = Support.berlin
-        var locale = "en_US"
         var text: String
         var hits: [ScriptedScanner.Hit]
         var expected: Expected?
@@ -76,7 +75,7 @@ final class NoteDateParserTests: XCTestCase {
     private func run(_ cases: [Case], file: StaticString = #filePath, line: UInt = #line) {
         for c in cases {
             let parsed = NoteDateParser(scanner: ScriptedScanner(c.hits))
-                .parse(c.text, reference: Support.date(c.now, c.zone), calendar: Support.calendar(c.zone), locale: Locale(identifier: c.locale))
+                .parse(c.text, reference: Support.date(c.now, c.zone), calendar: Support.calendar(c.zone))
             XCTAssertEqual(parsed.text, c.text, c.name, file: file, line: line)
             guard let expected = c.expected else {
                 XCTAssertNil(parsed.draft, "\(c.name): expected no draft", file: file, line: line)
@@ -284,8 +283,8 @@ final class NoteDateParserTests: XCTestCase {
             Case(name: "dotted time", now: Self.sunday, text: "Call Anna at 9.30", hits: [hit("9.30", "2026-11-16 09:30")], expected: nil),
             Case(name: "span without a day", now: Self.sunday, text: "Sync from 3pm to 4pm", hits: [hit("from 3pm to 4pm", "2026-11-16 15:00", duration: 3600)], expected: nil),
             Case(name: "dashed span without a day", now: Self.sunday, text: "Sync 3-4pm", hits: [hit("3-4pm", "2026-11-16 15:00", duration: 3600)], expected: nil),
-            Case(name: "German time without a day", now: Self.sunday, locale: "de_DE", text: "um 9 Uhr anrufen", hits: [hit("9 Uhr", "2026-11-16 09:00")], expected: nil),
-            Case(name: "Croatian clock time the detector finds under an English locale", now: Self.sunday, text: "sutra u 10:30",
+            Case(name: "German time without a day", now: Self.sunday, text: "um 9 Uhr anrufen", hits: [hit("9 Uhr", "2026-11-16 09:00")], expected: nil),
+            Case(name: "Croatian clock time the detector finds without a day", now: Self.sunday, text: "sutra u 10:30",
                  hits: [hit("10:30", "2026-11-15 22:30")], expected: nil),
             Case(name: "a dotted date is not a time", now: "2026-10-01 09:00", text: "Pay 13.11.2026",
                  hits: [hit("13.11.2026", "2026-11-13 12:00")],
@@ -376,7 +375,7 @@ final class NoteDateParserTests: XCTestCase {
         var buddhist = Calendar(identifier: .buddhist)
         buddhist.timeZone = Support.berlin
         let parsed = NoteDateParser(scanner: ScriptedScanner([hit("tomorrow", "2026-11-16 12:00")]))
-            .parse("Buy milk tomorrow", reference: reference, calendar: buddhist, locale: Support.en)
+            .parse("Buy milk tomorrow", reference: reference, calendar: buddhist)
         XCTAssertNil(parsed.draft)
     }
 
@@ -389,12 +388,12 @@ final class NoteDateParserTests: XCTestCase {
         let calendar = Support.calendar(Support.berlin)
 
         let tooLong = String(repeating: "a", count: NoteDateParser.maximumNoteLength - 8) + " tomorrow"
-        XCTAssertNil(parser.parse(tooLong, reference: reference, calendar: calendar, locale: Support.en).draft)
+        XCTAssertNil(parser.parse(tooLong, reference: reference, calendar: calendar).draft)
         XCTAssertEqual(scanner.calls.count, 0)
 
         let atTheLimit = String(repeating: "a", count: NoteDateParser.maximumNoteLength - 9) + " tomorrow"
         XCTAssertEqual(atTheLimit.utf16.count, NoteDateParser.maximumNoteLength)
-        let draft = parser.parse(atTheLimit, reference: reference, calendar: calendar, locale: Support.en).draft
+        let draft = parser.parse(atTheLimit, reference: reference, calendar: calendar).draft
         XCTAssertNotNil(draft)
         XCTAssertEqual(scanner.calls.count, 1)
     }
@@ -403,21 +402,20 @@ final class NoteDateParserTests: XCTestCase {
         let scanner = ScriptedScanner([hit("tomorrow", "2026-11-16 12:00")])
         let parser = NoteDateParser(scanner: scanner)
         for text in ["", " ", "\n\n", " \t\n "] {
-            XCTAssertNil(parser.parse(text, reference: Support.date(Self.sunday, Support.berlin), calendar: Support.calendar(Support.berlin), locale: Support.en).draft)
+            XCTAssertNil(parser.parse(text, reference: Support.date(Self.sunday, Support.berlin), calendar: Support.calendar(Support.berlin)).draft)
         }
         XCTAssertEqual(scanner.calls.count, 0)
     }
 
-    func testScannerGetsTheCallersReferenceZoneAndLocale() {
+    func testScannerGetsTheCallersReferenceAndZone() {
         let scanner = ScriptedScanner([])
         let reference = Support.date(Self.sunday, Support.losAngeles)
         _ = NoteDateParser(scanner: scanner)
-            .parse("Buy milk tomorrow", reference: reference, calendar: Support.calendar(Support.losAngeles), locale: Locale(identifier: "hr_HR"))
+            .parse("Buy milk tomorrow", reference: reference, calendar: Support.calendar(Support.losAngeles))
         XCTAssertEqual(scanner.calls.count, 1)
         XCTAssertEqual(scanner.calls.first?.text, "Buy milk tomorrow")
         XCTAssertEqual(scanner.calls.first?.reference, reference)
         XCTAssertEqual(scanner.calls.first?.timeZone, Support.losAngeles)
-        XCTAssertEqual(scanner.calls.first?.locale.identifier, "hr_HR")
     }
 
     // MARK: Titles
@@ -462,7 +460,7 @@ final class NoteDateParserTests: XCTestCase {
                  expected: .init(title: exactlyOneHundred, start: "2026-11-16", matched: "tomorrow")),
             Case(name: "emoji around the phrase", now: Self.sunday, text: "👩‍👩‍👧 Call Anna tomorrow at 9 🎉", hits: [hit("tomorrow at 9", "2026-11-16 09:00")],
                  expected: .init(title: "👩‍👩‍👧 Call Anna 🎉", start: "2026-11-16 09:00", matched: "tomorrow at 9")),
-            Case(name: "accents", now: Self.sunday, locale: "de_DE", text: "Zürich anrufen am Freitag", hits: [hit("Freitag", "2026-11-20 12:00")],
+            Case(name: "accents", now: Self.sunday, text: "Zürich anrufen am Freitag", hits: [hit("Freitag", "2026-11-20 12:00")],
                  expected: .init(title: "Zürich anrufen am", start: "2026-11-20", matched: "Freitag")),
         ])
     }
@@ -548,7 +546,7 @@ final class NoteDateParserTests: XCTestCase {
         let hit = ScriptedScanner.Hit(phrase: "Monday", at: "", instant: Support.utc("2026-11-16 22:30"))
         for (zone, expected) in [(Support.berlin, "2026-11-16 23:30"), (Support.losAngeles, "2026-11-16 14:30")] {
             let parsed = NoteDateParser(scanner: ScriptedScanner([hit]))
-                .parse("Call Anna Monday", reference: instant, calendar: Support.calendar(zone), locale: Support.en)
+                .parse("Call Anna Monday", reference: instant, calendar: Support.calendar(zone))
             XCTAssertEqual(parsed.draft?.start.hour, nil, "date-only in \(zone.identifier)")
             XCTAssertEqual(parsed.draft?.start, components(String(expected.prefix(10)), zone), zone.identifier)
         }

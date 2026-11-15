@@ -1,21 +1,29 @@
 import Foundation
-import VoiceAppCore
+@testable import VoiceAppCore
 import XCTest
 
-/// NSDataDetector has no reference-date parameter: it resolves "tomorrow" against the system clock. These tests
-/// therefore start from the real "now" and compute what they expect from it, so they hold on any day and in any
-/// machine time zone. Reproducible fixed-date tests live in NoteDateParserTests, which use a scripted scanner.
-final class SystemDateScannerTests: XCTestCase {
+/// NSDataDetector has no reference-date parameter: it resolves "tomorrow" against the system clock, in the process
+/// time zone and the preferred languages. These tests therefore start from the real "now" and compute what they
+/// expect from it, so they hold on any day. To see the detector as a user elsewhere would, they switch the process
+/// settings with ProcessSettings (test support only) around each scan. Reproducible fixed-date tests live in
+/// NoteDateParserTests, which use a scripted scanner.
+final class SystemDateScannerTests: ProcessSettingsTestCase {
     private typealias Support = NoteTestSupport
     private let scanner = SystemDateScanner()
 
-    private func phrases(_ text: String, _ localeID: String = "en_US", in timeZone: TimeZone = Support.berlin) throws -> [String] {
-        let now = try Support.nowAwayFromMidnight(in: timeZone)
-        return scanner.scan(text, reference: now, timeZone: timeZone, locale: Locale(identifier: localeID))
-            .map { String(text[$0.range]) }
+    /// The scanner as a user in `timeZone` speaking `localeID` would have it, asked to resolve in that same zone.
+    private func scan(_ text: String, at now: Date, in timeZone: TimeZone, speaking localeID: String = "en_US") -> [ScannedDate] {
+        ProcessSettings.asUser(in: timeZone, speaking: localeID) {
+            scanner.scan(text, reference: now, timeZone: timeZone)
+        }
     }
 
-    func testTomorrowAtNineResolvesInTheRequestedTimeZone() throws {
+    private func phrases(_ text: String, _ localeID: String = "en_US", in timeZone: TimeZone = Support.berlin) throws -> [String] {
+        let now = try Support.nowAwayFromMidnight(in: timeZone)
+        return scan(text, at: now, in: timeZone, speaking: localeID).map { String(text[$0.range]) }
+    }
+
+    func testTomorrowAtNineResolvesInTheProcessTimeZone() throws {
         for timeZone in [Support.berlin, Support.losAngeles, Support.auckland] {
             let now = try Support.nowAwayFromMidnight(in: timeZone)
             let calendar = Support.calendar(timeZone)
@@ -23,7 +31,7 @@ final class SystemDateScannerTests: XCTestCase {
             let expected = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow)!
             let text = "Call Anna tomorrow at 9"
 
-            let found = scanner.scan(text, reference: now, timeZone: timeZone, locale: Support.en)
+            let found = scan(text, at: now, in: timeZone)
 
             XCTAssertEqual(found.count, 1, timeZone.identifier)
             XCTAssertEqual(found.first?.date, expected, timeZone.identifier)
@@ -35,58 +43,145 @@ final class SystemDateScannerTests: XCTestCase {
 
     func testTimeSpanCarriesItsDuration() throws {
         let now = try Support.nowAwayFromMidnight(in: Support.berlin)
-        let found = scanner.scan("Sync tomorrow from 3pm to 4:30pm", reference: now, timeZone: Support.berlin, locale: Support.en)
-        XCTAssertEqual(found.first?.duration, 5400)
+        XCTAssertEqual(scan("Sync tomorrow from 3pm to 4:30pm", at: now, in: Support.berlin).first?.duration, 5400)
     }
 
     func testExplicitTimeZoneInTheTextIsReported() throws {
         let now = try Support.nowAwayFromMidnight(in: Support.berlin)
-        let found = scanner.scan("tomorrow at 9am PST", reference: now, timeZone: Support.berlin, locale: Support.en)
-        XCTAssertEqual(found.first?.namesTimeZone, true)
+        XCTAssertEqual(scan("tomorrow at 9am PST", at: now, in: Support.berlin).first?.namesTimeZone, true)
     }
 
     func testReferenceThatIsNotTheSystemClockYieldsNothing() throws {
         let now = try Support.nowAwayFromMidnight(in: Support.berlin)
         for offset: TimeInterval in [-3600, 3600, 86400 * 30] {
-            XCTAssertEqual(scanner.scan("tomorrow at 9", reference: now + offset, timeZone: Support.berlin, locale: Support.en), [],
-                "reference \(offset)s away from the system clock")
+            XCTAssertEqual(scan("tomorrow at 9", at: now + offset, in: Support.berlin), [], "reference \(offset)s away from the system clock")
         }
     }
 
     func testClockThatDisagreesWithTheReferenceYieldsNothing() {
         let reference = Support.date("2026-11-15 12:00", Support.berlin)
-        let skewed = SystemDateScanner(clock: { reference + 120 })
-        XCTAssertEqual(skewed.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin, locale: Support.en), [])
+        let skewed = SystemDateScanner(clock: { reference + 120 }, processTimeZone: { Support.berlin })
+        XCTAssertEqual(skewed.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin), [])
     }
 
     func testDayBoundaryCrossedBetweenReferenceAndScanYieldsNothing() {
         let reference = Support.date("2026-11-15 23:59:59", Support.berlin)
-        let afterMidnight = SystemDateScanner(clock: { reference + 2 })
-        XCTAssertEqual(afterMidnight.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin, locale: Support.en), [])
+        let afterMidnight = SystemDateScanner(clock: { reference + 2 }, processTimeZone: { Support.berlin })
+        XCTAssertEqual(afterMidnight.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin), [])
     }
 
     func testClockReadAfterTheScanIsAlsoChecked() {
         let reference = Support.date("2026-11-15 23:59:59", Support.berlin)
         let lock = NSLock()
         nonisolated(unsafe) var reads = 0
-        let drifting = SystemDateScanner(clock: {
-            lock.lock(); defer { lock.unlock() }
-            reads += 1
-            return reads == 1 ? reference : reference + 2
-        })
-        XCTAssertEqual(drifting.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin, locale: Support.en), [])
+        let drifting = SystemDateScanner(
+            clock: {
+                lock.lock(); defer { lock.unlock() }
+                reads += 1
+                return reads == 1 ? reference : reference + 2
+            },
+            processTimeZone: { Support.berlin })
+        XCTAssertEqual(drifting.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin), [])
         XCTAssertEqual(reads, 2)
     }
 
-    func testProcessTimeZoneAndLocaleAreRestoredAfterAScan() throws {
+    // MARK: The requested time zone must resolve like the process time zone
+
+    private func scanner(processZone: TimeZone, clockReads: Locked<Int>) -> SystemDateScanner {
+        let reference = Support.date("2026-11-15 12:00", Support.berlin)
+        return SystemDateScanner(clock: { clockReads.increment(); return reference }, processTimeZone: { processZone })
+    }
+
+    func testZoneThatIsNotTheProcessZoneYieldsNothingWithoutReadingTheClock() {
+        let reference = Support.date("2026-11-15 12:00", Support.berlin)
+        let reads = Locked(0)
+        let inLosAngeles = scanner(processZone: Support.losAngeles, clockReads: reads)
+        XCTAssertEqual(inLosAngeles.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin), [])
+        XCTAssertEqual(reads.value, 0)
+    }
+
+    func testZonesWithTheSameOffsetsAndRulesAreEquivalent() {
+        let reference = Support.date("2026-11-15 12:00", Support.berlin)
+        for other in ["Europe/Paris", "Europe/Zurich", "Europe/Berlin"] {
+            XCTAssertTrue(SystemDateScanner.resolvesAlike(Support.berlin, TimeZone(identifier: other)!, around: reference), other)
+        }
+    }
+
+    func testZonesWithTheSameOffsetTodayButDifferentRulesAreNotEquivalent() {
+        // Lagos is UTC+1 all year, as Berlin is in November; Berlin moves to UTC+2 in March.
+        let lagos = TimeZone(identifier: "Africa/Lagos")!
+        let november = Support.date("2026-11-15 12:00", Support.berlin)
+        XCTAssertEqual(lagos.secondsFromGMT(for: november), Support.berlin.secondsFromGMT(for: november))
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(Support.berlin, lagos, around: november))
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(lagos, Support.berlin, around: november))
+    }
+
+    func testZonesWithADifferentOffsetAreNotEquivalent() {
+        let reference = Support.date("2026-11-15 12:00", Support.berlin)
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(Support.berlin, Support.losAngeles, around: reference))
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(Support.berlin, TimeZone(identifier: "UTC")!, around: reference))
+    }
+
+    func testZonesThatChangeOnDifferentDaysAreNotEquivalent() {
+        // Both are UTC-5 in winter and UTC-4 in summer, but the United States and Cuba switch at different moments.
+        let newYork = TimeZone(identifier: "America/New_York")!, havana = TimeZone(identifier: "America/Havana")!
+        let reference = Support.date("2026-01-15 12:00", newYork)
+        XCTAssertEqual(newYork.secondsFromGMT(for: reference), havana.secondsFromGMT(for: reference))
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(newYork, havana, around: reference))
+    }
+
+    func testEquivalenceHoldsRightAfterATransition() {
+        let reference = Support.date("2026-03-29 12:00", Support.berlin)
+        XCTAssertTrue(SystemDateScanner.resolvesAlike(Support.berlin, TimeZone(identifier: "Europe/Paris")!, around: reference))
+    }
+
+    func testProcessZoneChangingDuringTheScanYieldsNothing() {
+        let reference = Support.date("2026-11-15 12:00", Support.berlin)
+        let reads = Locked(0)
+        let changing = SystemDateScanner(
+            clock: { reference },
+            processTimeZone: { reads.increment() == 1 ? Support.berlin : Support.losAngeles })
+        XCTAssertEqual(changing.scan("tomorrow at 9", reference: reference, timeZone: Support.berlin), [])
+        XCTAssertEqual(reads.value, 2)
+    }
+
+    func testAnEquivalentRequestedZoneGetsTheProcessResult() throws {
+        let paris = TimeZone(identifier: "Europe/Paris")!
         let now = try Support.nowAwayFromMidnight(in: Support.berlin)
-        let zoneBefore = NSTimeZone.default
-        let localeBefore = Locale.current.identifier
-        let languagesBefore = Locale.preferredLanguages
-        _ = scanner.scan("tomorrow at 9", reference: now, timeZone: Support.auckland, locale: Locale(identifier: "hr_HR"))
-        XCTAssertEqual(NSTimeZone.default, zoneBefore)
-        XCTAssertEqual(Locale.current.identifier, localeBefore)
-        XCTAssertEqual(Locale.preferredLanguages, languagesBefore)
+        let found = ProcessSettings.asUser(in: Support.berlin) {
+            scanner.scan("tomorrow at 9", reference: now, timeZone: paris)
+        }
+        let calendar = Support.calendar(Support.berlin)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!
+        XCTAssertEqual(found.first?.date, calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow))
+    }
+
+    func testARequestedZoneThatIsNotTheProcessZoneYieldsNothingFromTheRealDetector() throws {
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
+        for requested in [Support.losAngeles, Support.auckland, TimeZone(identifier: "Africa/Lagos")!] {
+            let found = ProcessSettings.asUser(in: Support.berlin) {
+                scanner.scan("tomorrow at 9", reference: now, timeZone: requested)
+            }
+            XCTAssertEqual(found, [], requested.identifier)
+        }
+    }
+
+    // MARK: Switching the settings from the tests
+
+    func testSwitchedSettingsAreRestoredAfterTheBody() {
+        let before = ProcessSettings.Snapshot.take()
+        ProcessSettings.asUser(in: Support.auckland, speaking: "hr_HR") {
+            XCTAssertEqual(NSTimeZone.default, Support.auckland)
+            XCTAssertEqual(Locale.preferredLanguages, ["hr-HR"])
+        }
+        XCTAssertEqual(ProcessSettings.Snapshot.take(), before)
+    }
+
+    func testSwitchedSettingsAreRestoredWhenTheBodyThrows() {
+        struct Failure: Error {}
+        let before = ProcessSettings.Snapshot.take()
+        XCTAssertThrowsError(try ProcessSettings.asUser(in: Support.auckland, speaking: "de_DE") { throw Failure() })
+        XCTAssertEqual(ProcessSettings.Snapshot.take(), before)
     }
 
     // MARK: Recorded detector behaviour (matched phrase only, so the rows hold on any day)
