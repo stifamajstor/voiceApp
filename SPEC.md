@@ -19,9 +19,17 @@ Everything runs on-device. No accounts, no cloud.
 - `VoiceAppCore.MemoryStore` uses GRDB/SQLite with FTS5 under
   `~/Library/Application Support/VoiceApp/store/store.sqlite` (directory injectable for tests).
   Immutable dictation/note/prompt records carry UUIDs and a database-persisted install ID.
+  The schema permits only a live-to-tombstone update; tombstones cannot be updated. Swift validates record kinds
+  and rejects negative or non-finite durations. Audio locations are derived from the record UUID and an optional
+  1–10 character ASCII alphanumeric extension, exposed by `audioURL(for:)`.
   Deletion clears all payload fields and audio, keeping only an ID/device ID/deletion timestamp tombstone.
+  Audio symlinks are never followed; unexpected objects do not block tombstoning, while a file removal failure
+  leaves the record live for retry. Connections use a five-second busy timeout and `PRAGMA secure_delete = ON`.
+  A database-local file lock serializes migrations across first opens.
+  FTS optimization after deletion scrubs deleted tokens without requiring FTS5 secure-delete (SQLite 3.42+).
   Named migrations use descriptive feature-qualified names, registered in dependency order; do not number them.
-  Search matches all typed words literally across raw and final text, newest first.
+  Search quotes Unicode tokens across raw and final text, with only the last token treated as a prefix.
+  Listing and search order by creation time descending, then insertion order descending.
   The store is not connected to dictation yet; menu history remains in memory.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from

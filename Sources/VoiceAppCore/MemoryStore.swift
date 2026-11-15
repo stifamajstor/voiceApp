@@ -1,9 +1,11 @@
+import Darwin
 import Foundation
 import GRDB
 
 public final class MemoryStore: Sendable {
-    public enum StoreError: Error {
-        case invalidAudioPath
+    public enum StoreError: Error, Equatable {
+        case invalidAudioExtension
+        case invalidDuration
         case missingDeviceID
     }
 
@@ -19,7 +21,21 @@ public final class MemoryStore: Sendable {
     public init(directory: URL = MemoryStore.defaultDirectory) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.directory = directory.standardizedFileURL.resolvingSymlinksInPath()
-        database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path)
+        // GRDB reads migration state before taking its write lock, so first opens must serialize migrations.
+        let migrationLock = open(self.directory.appending(path: "store.lock").path,
+            O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard migrationLock >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { Darwin.close(migrationLock) }
+        while flock(migrationLock, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var configuration = Configuration()
+        configuration.busyMode = .timeout(5)
+        configuration.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+        }
+        database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path, configuration: configuration)
         try Self.migrator.migrate(database)
         deviceID = try database.read { db in
             guard let id = try UUID.fetchOne(db, sql: "SELECT deviceID FROM storeMetadata WHERE singleton = 1")
@@ -43,18 +59,22 @@ public final class MemoryStore: Sendable {
         project: String? = nil,
         modelID: String? = nil,
         durationSeconds: Double? = nil,
-        audioPath: String? = nil
+        audioExtension: String? = nil
     ) throws -> MemoryRecord {
+        if let durationSeconds, !durationSeconds.isFinite || durationSeconds < 0 {
+            throw StoreError.invalidDuration
+        }
+        let id = UUID()
+        let audioPath = try audioExtension.map { "audio/\(id.uuidString).\(try Self.validatedAudioExtension($0))" }
         // Match the timestamp precision restored from SQLite's Unix-epoch REAL.
         let record = MemoryRecord(
-            id: UUID(), deviceID: deviceID, kind: kind,
+            id: id, deviceID: deviceID, kind: kind,
             createdAt: Date(timeIntervalSince1970: createdAt.timeIntervalSince1970),
             rawText: rawText, finalText: finalText ?? rawText, appBundleID: appBundleID,
             appName: appName, project: project, modelID: modelID,
             durationSeconds: durationSeconds, audioPath: audioPath, deletedAt: nil
         )
         return try database.write { db in
-            if let audioPath { _ = try audioURL(for: audioPath) }
             try record.insert(db)
             return record
         }
@@ -74,7 +94,7 @@ public final class MemoryStore: Sendable {
             try MemoryRecord.fetchAll(db, sql: """
                 SELECT * FROM records
                 WHERE deletedAt IS NULL AND (? IS NULL OR kind = ?)
-                ORDER BY createdAt DESC, id DESC LIMIT ?
+                ORDER BY createdAt DESC, records.rowid DESC LIMIT ?
                 """, arguments: [kind?.rawValue, kind?.rawValue, limit])
         }
     }
@@ -85,13 +105,15 @@ public final class MemoryStore: Sendable {
             let tokens = try db.makeTokenizer(.unicode61()).tokenize(query: query)
             guard !tokens.isEmpty else { return [] }
             // Quoting tokens prevents typed text from becoming FTS operators or column selectors.
-            let pattern = tokens.map { "\"" + $0.token.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
-                .joined(separator: " AND ")
+            let pattern = tokens.enumerated().map { index, token in
+                let quoted = "\"" + token.token.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+                return quoted + (index == tokens.count - 1 ? "*" : "")
+            }.joined(separator: " AND ")
             return try MemoryRecord.fetchAll(db, sql: """
                 SELECT records.* FROM records
                 JOIN recordsFTS ON recordsFTS.rowid = records.rowid
                 WHERE recordsFTS MATCH ? AND deletedAt IS NULL AND (? IS NULL OR kind = ?)
-                ORDER BY createdAt DESC, id DESC LIMIT ?
+                ORDER BY createdAt DESC, records.rowid DESC LIMIT ?
                 """, arguments: [pattern, kind?.rawValue, kind?.rawValue, limit])
         }
     }
@@ -110,13 +132,8 @@ public final class MemoryStore: Sendable {
             guard let record = try MemoryRecord.fetchOne(db,
                 sql: "SELECT * FROM records WHERE id = ? AND deletedAt IS NULL",
                 arguments: [id.uuidString]) else { return }
-            if let path = record.audioPath {
-                let url = try audioURL(for: path)
-                do {
-                    try FileManager.default.removeItem(at: url)
-                } catch CocoaError.fileNoSuchFile {
-                    // A missing file must not prevent retrying an interrupted deletion.
-                }
+            if let audio = try audioURL(for: record) {
+                try removeAudio(at: audio)
             }
             try db.execute(sql: """
                 UPDATE records SET kind = NULL, createdAt = NULL, rawText = NULL, finalText = NULL,
@@ -124,28 +141,47 @@ public final class MemoryStore: Sendable {
                     durationSeconds = NULL, audioPath = NULL, deletedAt = ?
                 WHERE id = ?
                 """, arguments: [Date.now.timeIntervalSince1970, id.uuidString])
+            // Older macOS 14 SQLite lacks FTS5 secure-delete; merge away its deletion markers.
+            try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS) VALUES('optimize')")
         }
     }
 
-    private func audioURL(for path: String) throws -> URL {
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !components.isEmpty, !path.utf8.contains(0),
-              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
-              !components[0].lowercased().hasPrefix("store.sqlite") else { throw StoreError.invalidAudioPath }
-        var url = directory
-        for (index, component) in components.enumerated() {
-            url.append(path: String(component))
-            do {
-                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-                let expectedType: FileAttributeType = index == components.count - 1 ? .typeRegular : .typeDirectory
-                guard attributes[.type] as? FileAttributeType == expectedType else {
-                    throw StoreError.invalidAudioPath
-                }
-            } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
-                continue
-            }
+    public func audioURL(for record: MemoryRecord) throws -> URL? {
+        guard let path = record.audioPath else { return nil }
+        let ext = try Self.validatedAudioExtension((path as NSString).pathExtension)
+        return directory.appending(path: "audio/\(record.id.uuidString).\(ext)")
+    }
+
+    private static func validatedAudioExtension(_ value: String) throws -> String {
+        guard (1...10).contains(value.utf8.count), value.utf8.allSatisfy({
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
+        }) else { throw StoreError.invalidAudioExtension }
+        return value.lowercased()
+    }
+
+    private func removeAudio(at url: URL) throws {
+        // Directory descriptors prevent a replaced audio folder from redirecting deletion outside the store.
+        let root = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard root >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { Darwin.close(root) }
+        let audio = openat(root, "audio", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard audio >= 0 else {
+            if errno == ENOENT || errno == ENOTDIR || errno == ELOOP { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        return url
+        defer { Darwin.close(audio) }
+        var info = stat()
+        let name = url.lastPathComponent
+        guard fstatat(audio, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+            if errno == ENOENT { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let type = info.st_mode & S_IFMT
+        guard type == S_IFREG || type == S_IFLNK else { return }
+        guard unlinkat(audio, name, 0) == 0 else {
+            if type == S_IFLNK || errno == ENOENT || errno == EISDIR { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private static var migrator: DatabaseMigrator {
@@ -159,7 +195,7 @@ public final class MemoryStore: Sendable {
                 CREATE TABLE records (
                     id TEXT PRIMARY KEY NOT NULL,
                     deviceID TEXT NOT NULL,
-                    kind TEXT CHECK (kind IN ('dictation', 'note', 'prompt')),
+                    kind TEXT,
                     createdAt REAL,
                     rawText TEXT,
                     finalText TEXT,
@@ -179,8 +215,14 @@ public final class MemoryStore: Sendable {
                             AND durationSeconds IS NULL AND audioPath IS NULL)
                     )
                 );
-                CREATE INDEX records_recent ON records (createdAt DESC, id DESC) WHERE deletedAt IS NULL;
-                CREATE UNIQUE INDEX records_audio ON records (audioPath) WHERE audioPath IS NOT NULL;
+                CREATE TRIGGER records_immutable BEFORE UPDATE ON records
+                WHEN OLD.deletedAt IS NOT NULL OR NEW.deletedAt IS NULL
+                    OR NEW.id IS NOT OLD.id OR NEW.deviceID IS NOT OLD.deviceID
+                    OR NEW.rowid IS NOT OLD.rowid
+                BEGIN
+                    SELECT RAISE(ABORT, 'records can only transition to tombstones');
+                END;
+                CREATE INDEX records_recent ON records (createdAt) WHERE deletedAt IS NULL;
                 """)
             try db.execute(sql: "INSERT INTO storeMetadata (singleton, deviceID) VALUES (1, ?)",
                 arguments: [UUID().uuidString])

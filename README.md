@@ -165,7 +165,13 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 
 Bare Swift filenames in this table live under `Sources/VoiceApp/`. The build script adjusts generated SwiftPM resource accessors and copies dependency bundles into `Contents/Resources`, so the packaged app does not depend on the source checkout's `.build` directory.
 
-`MemoryStore` defaults to `~/Library/Application Support/VoiceApp/store/store.sqlite`; tests inject temporary directories. It stores immutable dictation, note, and prompt records, indexes raw/final text with FTS5, and preserves payload-free deletion tombstones. Optional audio paths must be unique and relative to the store directory. Deletion rejects traversal, symlinks, database files, and directories. The store is not wired into dictation yet, so the menu's last three transcripts remain in memory only.
+`MemoryStore` defaults to `~/Library/Application Support/VoiceApp/store/store.sqlite`; tests inject temporary directories. It stores immutable dictation, note, and prompt records, indexes raw/final text with FTS5, and preserves payload-free deletion tombstones.
+
+Callers can supply an optional 1–10 character ASCII alphanumeric audio extension; the store derives `audio/<record UUID>.<lowercase extension>`. Use `audioURL(for:)` to get the file location and create its parent directory before writing audio. Deletion removes the file or symlink itself without following symlinks, tolerates unexpected filesystem objects, and leaves the record live if its audio file cannot be removed.
+
+Search treats the last word as a prefix and breaks timestamp ties by insertion order. Connections wait up to five seconds for another writer; a database-local file lock serializes first-open migrations. Deletion explicitly enables SQLite secure deletion and optimizes the FTS index to scrub deleted text on older SQLite versions too.
+
+The store is not wired into dictation yet, so the menu's last three transcripts remain in memory only.
 
 GitHub Actions runs `swift build` and `swift test` on pull requests and pushes to `main`, using macOS 26 and Xcode 26.2 (Swift 6.2). Before shipping a change, also check the packaged app's model download/load, both dictation modes, permissions, actual transcription, paste into another app, and clipboard restoration. Core tests and signature verification alone do not prove those flows.
 
