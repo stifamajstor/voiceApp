@@ -1,4 +1,5 @@
 import Foundation
+import VoiceAppCore
 import XCTest
 
 enum NoteTestSupport {
@@ -59,5 +60,37 @@ extension Locked where Value == Int {
         lock.lock(); defer { lock.unlock() }
         stored += 1
         return stored
+    }
+}
+
+/// Returns synthetic hits; `at` is read in the zone passed to `scan`.
+final class ScriptedDateScanner: DateScanner, @unchecked Sendable {
+    struct Hit {
+        var phrase: String
+        var at: String
+        var duration: TimeInterval = 0
+        var namesTimeZone = false
+        var instant: Date?
+    }
+
+    let hits: [Hit]
+    private let lock = NSLock()
+    private var seen: [(text: String, reference: Date, timeZone: TimeZone)] = []
+
+    init(_ hits: [Hit]) { self.hits = hits }
+
+    var calls: [(text: String, reference: Date, timeZone: TimeZone)] {
+        lock.lock(); defer { lock.unlock() }
+        return seen
+    }
+
+    func scan(_ text: String, reference: Date, timeZone: TimeZone) -> [ScannedDate] {
+        lock.lock(); seen.append((text, reference, timeZone)); lock.unlock()
+        return hits.compactMap { hit in
+            guard let range = text.range(of: hit.phrase) else { return nil }
+            return ScannedDate(
+                range: range, date: hit.instant ?? NoteTestSupport.date(hit.at, timeZone),
+                duration: hit.duration, namesTimeZone: hit.namesTimeZone)
+        }
     }
 }

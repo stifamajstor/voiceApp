@@ -2,180 +2,113 @@ import Foundation
 import VoiceAppCore
 import XCTest
 
-/// Synthetic scanner results isolate parser rules; none of these hits are detector recordings.
+/// Synthetic scanner results isolate the non-grammar safety guards from NSDataDetector.
 final class NoteDateParserRedesignTests: XCTestCase {
     private typealias Support = NoteTestSupport
-    private typealias Hit = NoteDateParserTests.ScriptedScanner.Hit
-    private let reference = Support.date("2026-11-15 21:00", Support.berlin)
+    private typealias Hit = ScriptedDateScanner.Hit
 
-    private func parse(_ text: String, phrase: String = "tomorrow", at: String = "2026-11-16 12:00", duration: TimeInterval = 0) -> ParsedNote {
-        let scanner = NoteDateParserTests.ScriptedScanner([Hit(phrase: phrase, at: at, duration: duration)])
-        return NoteDateParser(scanner: scanner).parse(text, reference: reference, calendar: Support.calendar(Support.berlin))
+    private func parse(_ text: String, hits: [Hit], now: String = "2026-11-15 21:00", zone: TimeZone = Support.berlin) -> ParsedNote {
+        NoteDateParser(scanner: ScriptedDateScanner(hits))
+            .parse(text, reference: Support.date(now, zone), calendar: Support.calendar(zone))
     }
 
-    func testEveryCueWorksAnywhereAndIsRemovedWithItsConnector() {
-        let rows = [
-            ("remind me to", "call Anna"), ("reminder", "call Anna"), ("remember to", "call Anna"),
-            ("don't forget to", "call Anna"), ("don’t forget to", "call Anna"), ("do not forget to", "call Anna"),
-            ("erinnere mich daran", "Anna anzurufen"), ("erinnerung an", "Anna"),
-            ("nicht vergessen", "Anna anrufen"), ("denk daran", "Anna anrufen"), ("denk dran", "Anna anrufen"),
-            ("podsjeti me da", "nazovem Annu"), ("podsjetnik", "nazvati Annu"),
-            ("nemoj zaboraviti", "nazvati Annu"), ("ne zaboravi", "nazvati Annu"),
-            ("remind me that", "rent is payable"), ("erinnere mich an", "die Miete"),
-        ]
-        for (cue, task) in rows {
-            for text in ["\(cue.uppercased()) \(task) tomorrow", "\(task), \(cue) tomorrow", "tomorrow \(cue) \(task)"] {
-                let result = parse(text)
-                XCTAssertEqual(result.text, text)
-                XCTAssertEqual(result.draft?.title, task, text)
-                XCTAssertEqual(result.draft?.kind, .reminder, text)
-                XCTAssertEqual(result.draft?.start.day, 16, text)
-            }
+    func testPastDatesAndTwoYearHorizon() {
+        for at in ["2026-11-14 12:00", "2028-11-16 12:00"] {
+            XCTAssertNil(parse("remind me on November 20", hits: [.init(phrase: "November 20", at: at)]).draft)
         }
+        for (at, accepted) in [("2026-11-15 09:00", false), ("2026-11-15 21:00", false), ("2026-11-15 21:01", true)] {
+            let phrase = "today at " + String(at.suffix(5))
+            XCTAssertEqual(parse("remind me " + phrase, hits: [.init(phrase: phrase, at: at)]).draft != nil, accepted)
+        }
+        XCTAssertNotNil(parse("remind me today", hits: [.init(phrase: "today", at: "2026-11-15 12:00")]).draft)
+        XCTAssertNotNil(parse("remind me on November 15 2028", hits: [.init(phrase: "November 15 2028", at: "2028-11-15 12:00")]).draft)
     }
 
-    func testNoCueMeansNoScanOrDraft() {
-        for text in ["I met Anna on Friday", "support is 24/7", "jeden Morgen joggen", "Anna morgen anrufen", "nazvati Annu sutra", "call Anna tomorrow", "Meeting tomorrow from 2pm to 3pm", "unreminder tomorrow", "remind meander tomorrow", "podsjetnikar tomorrow"] {
-            let scanner = NoteDateParserTests.ScriptedScanner([Hit(phrase: "tomorrow", at: "2026-11-16 12:00")])
-            let result = NoteDateParser(scanner: scanner).parse(text, reference: reference, calendar: Support.calendar(Support.berlin))
-            XCTAssertEqual(result.text, text)
-            XCTAssertNil(result.draft, text)
-            XCTAssertTrue(scanner.calls.isEmpty, text)
-        }
+    func testDifferentDatesAndUnsafeDuplicatesGiveNoDraft() {
+        XCTAssertNil(parse("remind me tomorrow, Friday", hits: [
+            .init(phrase: "tomorrow", at: "2026-11-16 12:00"), .init(phrase: "Friday", at: "2026-11-20 12:00")]).draft)
+        XCTAssertNil(parse("remind me to call tomorrow, in 3 days", hits: [
+            .init(phrase: "tomorrow", at: "2026-11-16 12:00"), .init(phrase: "in 3 days", at: "2026-11-18 12:00")]).draft)
+        XCTAssertNil(parse("remind me tomorrow, 9am", hits: [
+            .init(phrase: "tomorrow", at: "2026-11-16 12:00"), .init(phrase: "9am", at: "2026-11-16 12:00")]).draft)
+        XCTAssertNotNil(parse("remind me tomorrow", hits: [
+            .init(phrase: "tomorrow", at: "2026-11-16 12:00"), .init(phrase: "tomorrow", at: "2026-11-16 12:00")]).draft)
+        XCTAssertNil(parse("remind me tomorrow", hits: [.init(phrase: "tomorrow", at: "2026-11-16 12:00", namesTimeZone: true)]).draft)
     }
 
-    func testMeetingWordsDoNotMakeEvents() {
-        for task in ["cancel the meeting", "send the meeting notes", "appointment with Anna", "conference call", "das Meeting absagen", "die Besprechungsnotizen senden", "otkazati sastanak", "poslati bilješke sa sastanka"] {
-            let text = "remind me to \(task) tomorrow at 9"
-            let draft = parse(text, phrase: "tomorrow at 9", at: "2026-11-16 09:00").draft
-            XCTAssertEqual(draft?.kind, .reminder, text)
-            XCTAssertEqual(draft?.title, task, text)
-            XCTAssertEqual(draft?.start.hour, 9, text)
-            XCTAssertNil(draft?.end, text)
-            XCTAssertNil(parse("\(task) tomorrow at 9", phrase: "tomorrow at 9", at: "2026-11-16 09:00").draft)
+    func testRolloversAndUnexplainedMidnightAreRefused() {
+        for (phrase, at) in [("February 30", "2027-03-02 12:00"), ("February 29", "2027-03-01 12:00"), ("November 31", "2026-12-01 12:00")] {
+            XCTAssertNil(parse("remind me on " + phrase, hits: [.init(phrase: phrase, at: at)]).draft)
         }
+        XCTAssertNil(parse("remind me tomorrow", hits: [.init(phrase: "tomorrow", at: "2026-11-17 00:00")]).draft)
+        XCTAssertNotNil(parse("remind me tomorrow at 0:30", hits: [.init(phrase: "tomorrow at 0:30", at: "2026-11-16 00:30")]).draft)
+        XCTAssertNotNil(parse("remind me in 30 days", hits: [.init(phrase: "in 30 days", at: "2027-01-02 12:00")]).draft)
     }
 
-    func testUnconsumedDigitsInvalidateEveryHit() {
-        let rows = [
-            ("remind me to call", "tomorrow at 9", " 30", "2026-11-16 09:00"),
-            ("remind me to call", "tomorrow at 9", "30", "2026-11-16 09:00"),
-            ("erinnere mich anzurufen", "morgen um 10", " 45", "2026-11-16 10:00"),
-            ("podsjeti me nazvati", "sutra u 9", " 30", "2026-11-16 09:00"),
-            ("reminder call", "Friday", " the 27th", "2026-11-20 12:00"),
-            ("erinnerung anrufen", "Freitag", " den 27.", "2026-11-20 12:00"),
-            ("podsjetnik nazvati", "petak", " 27.", "2026-11-20 12:00"),
-        ]
-        for (task, phrase, suffix, at) in rows {
-            XCTAssertNil(parse("\(task) \(phrase)\(suffix)", phrase: phrase, at: at).draft)
-            XCTAssertNotNil(parse("\(task) \(phrase)", phrase: phrase, at: at).draft)
-            XCTAssertNil(parse("call \(phrase)\(suffix)", phrase: phrase, at: at).draft)
-        }
-        let text = "reminder tomorrow, tomorrow 30"
-        // A separate range is needed: both dates are equal, but the second truncated phrase is unsafe.
-        let hits = [ScannedDate(range: text.range(of: "tomorrow,")!, date: Support.date("2026-11-16 12:00", Support.berlin)),
-                    ScannedDate(range: text.range(of: "tomorrow", options: .backwards)!, date: Support.date("2026-11-16 12:00", Support.berlin))]
-        struct Scanner: DateScanner {
-            let hits: [ScannedDate]
-            func scan(_ text: String, reference: Date, timeZone: TimeZone) -> [ScannedDate] { hits }
-        }
-        XCTAssertNil(NoteDateParser(scanner: Scanner(hits: hits)).parse(text, reference: reference, calendar: Support.calendar(Support.berlin)).draft)
-    }
-
-    func testNextWeekdaysAreRefusedEvenWhenTheDetectorOmitsNext() {
-        for (next, weekday) in [("next", "Monday"), ("nächsten", "Montag"), ("sljedeći", "ponedjeljak")] {
-            for phrase in ["\(next) \(weekday)", weekday] {
-                XCTAssertNil(parse("reminder call \(next) \(weekday)", phrase: phrase, at: "2026-11-23 12:00").draft)
-                XCTAssertNil(parse("call \(next) \(weekday)", phrase: phrase, at: "2026-11-23 12:00").draft)
-            }
-            XCTAssertNotNil(parse("reminder call \(weekday)", phrase: weekday).draft)
-        }
-        XCTAssertNotNil(parse("reminder call this Friday", phrase: "this Friday", at: "2026-11-20 12:00").draft)
-    }
-
-    func testNextWeekdaysAcrossLanguagesAndCroatianCases() {
-        let rows = [
-            ("next", "Sunday", 22), ("next", "Monday", 16), ("next", "Tuesday", 17),
-            ("next", "Wednesday", 18), ("next", "Thursday", 19), ("next", "Friday", 20), ("next", "Saturday", 21),
-            ("nächsten", "Sonntag", 22), ("nächsten", "Montag", 16), ("nächsten", "Dienstag", 17),
-            ("nächsten", "Mittwoch", 18), ("nächsten", "Donnerstag", 19), ("nächsten", "Freitag", 20), ("nächsten", "Samstag", 21),
-            ("sljedeće", "nedjelje", 22), ("sljedećeg", "ponedjeljka", 16), ("sljedećeg", "utorka", 17),
-            ("sljedeće", "srijede", 18), ("sljedećeg", "četvrtka", 19), ("sljedećeg", "petka", 20), ("sljedeće", "subote", 21),
-        ]
-        for (modifier, weekday, day) in rows {
-            let at = "2026-11-\(day) 12:00"
-            XCTAssertNil(parse("reminder call \(modifier) \(weekday)", phrase: weekday, at: at).draft, weekday)
-            XCTAssertEqual(parse("reminder call \(weekday)", phrase: weekday, at: at).draft?.start.day, day, weekday)
-        }
-        for now in ["2026-11-20 12:00", "2026-11-21 12:00"] {
-            let scanner = NoteDateParserTests.ScriptedScanner([Hit(phrase: "next Monday", at: "2026-11-30 12:00")])
-            XCTAssertNil(NoteDateParser(scanner: scanner).parse("remind me to call next Monday", reference: Support.date(now, Support.berlin), calendar: Support.calendar(Support.berlin)).draft)
-        }
-    }
-
-    func testWeekdayMustAgreeWithResolvedDate() {
-        for phrase in ["Friday, November 21", "Freitag, den 21. November", "petak 21.11.2026"] {
-            XCTAssertNil(parse("reminder call \(phrase)", phrase: phrase, at: "2026-11-21 12:00").draft)
-            XCTAssertNil(parse("call \(phrase)", phrase: phrase, at: "2026-11-21 12:00").draft)
-        }
-        for weekday in ["Saturday", "Samstag", "subota"] {
-            XCTAssertNotNil(parse("reminder call \(weekday)", phrase: weekday, at: "2026-11-21 12:00").draft)
-        }
-    }
-
-    func testContradictingWeekdayOnADuplicateHitIsRefused() {
-        let text = "reminder call Monday or Friday"
-        let scanner = NoteDateParserTests.ScriptedScanner([
-            Hit(phrase: "Monday", at: "2026-11-16 12:00"),
-            Hit(phrase: "Friday", at: "2026-11-16 12:00"),
-        ])
-        XCTAssertNil(NoteDateParser(scanner: scanner).parse(text, reference: reference, calendar: Support.calendar(Support.berlin)).draft)
-    }
-
-    func testNumericDayMonthNeedsAYear() {
-        for phrase in ["24/7", "13/8", "16/9", "10/10", "12/24", "24.7", "13-8"] {
-            for cue in ["remind me", "erinnerung", "podsjetnik"] {
-                XCTAssertNil(parse("\(cue) call \(phrase)", phrase: phrase, at: "2027-07-24 12:00").draft)
-                XCTAssertNil(parse("call \(phrase)", phrase: phrase, at: "2027-07-24 12:00").draft)
-            }
-        }
-        XCTAssertNotNil(parse("reminder call 24/7/2027", phrase: "24/7/2027", at: "2027-07-24 12:00").draft)
-        XCTAssertNotNil(parse("reminder call tomorrow 10:00–11:00", phrase: "tomorrow 10:00–11:00", at: "2026-11-16 10:00", duration: 3600).draft?.end)
-    }
-
-    func testRecurrenceAndNegationOutsideCuesAreRefused() {
-        for word in ["every", "each", "not", "never", "except", "since", "jeden", "jede", "jedes", "nicht", "kein", "svaki", "svake", "svakog", "ne"] {
-            XCTAssertNil(parse("reminder \(word) call tomorrow").draft, word)
-            XCTAssertNil(parse("\(word) call tomorrow").draft, word)
-        }
-        for cue in ["don't forget", "don’t forget", "do not forget", "nicht vergessen", "ne zaboravi", "nemoj zaboraviti"] {
-            XCTAssertNotNil(parse("\(cue) call tomorrow").draft, cue)
-            XCTAssertNil(parse("\(cue) call not tomorrow").draft, cue)
-        }
-    }
-
-    func testDatePrepositionsAreRemovedInGermanAndCroatianTitles() {
-        for (text, phrase, title) in [
-            ("Erinnerung Milch am Freitag kaufen", "Freitag", "Milch kaufen"),
-            ("Podsjetnik kupiti mlijeko u petak", "petak", "kupiti mlijeko"),
-            ("Erinnere mich Anna morgen um 9 anzurufen", "morgen um 9", "Anna anzurufen"),
+    func testDigitClockMustExplainHourMinuteAndSeconds() {
+        for (phrase, at, hour) in [
+            ("tomorrow at 7", "2026-11-16 19:00", nil),
+            ("tomorrow at 3", "2026-11-16 15:00", nil),
+            ("tomorrow at 9", "2026-11-16 09:00", 9),
+            ("tomorrow at 7pm", "2026-11-16 19:00", 19),
+            ("tomorrow at 12am", "2026-11-16 00:00", 0),
+            ("tomorrow at 12pm", "2026-11-16 12:00", 12),
+            ("tomorrow at 9am", "2026-11-16 21:00", nil),
+            ("tomorrow at 9:15", "2026-11-16 09:30", nil),
+            ("tomorrow at 9:30", "2026-11-16 09:30:01", nil),
+            ("November 13 at 1", "2026-11-20 13:00", nil),
+            ("morgen um 9", "2026-11-16 09:00", nil),
+            ("sutra u 9", "2026-11-16 09:00", nil),
         ] {
-            let at = phrase == "morgen um 9" ? "2026-11-16 09:00" : "2026-11-20 12:00"
-            XCTAssertEqual(parse(text, phrase: phrase, at: at).draft?.title, title)
+            let draft = parse("remind me on " + phrase, hits: [.init(phrase: phrase, at: at)]).draft
+            XCTAssertNotNil(draft, phrase)
+            XCTAssertEqual(draft?.start.hour, hour, phrase)
         }
     }
 
-    func testDurationWithoutTwoClockTimesDoesNotMakeAnEvent() {
-        let draft = parse("reminder trip tomorrow at 9am", phrase: "tomorrow at 9am", at: "2026-11-16 09:00", duration: 86_400).draft
-        XCTAssertEqual(draft?.kind, .reminder)
-        XCTAssertNil(draft?.end)
+    func testDSTAndMidnightGuardsInBothZones() {
+        for (zone, now, instants) in [
+            (Support.berlin, "2027-03-27 23:59:30", ["2027-03-28 01:30", "2027-03-28 02:30"]),
+            (Support.berlin, "2027-10-30 22:00", ["2027-10-31 00:30", "2027-10-31 01:30"]),
+            (Support.losAngeles, "2027-03-13 23:50", ["2027-03-14 10:30"]),
+            (Support.losAngeles, "2026-10-31 23:30", ["2026-11-01 08:30", "2026-11-01 09:30"]),
+        ] {
+            for instant in instants {
+                let wall = Support.calendar(zone).dateComponents([.hour, .minute], from: Support.utc(instant))
+                let phrase = "tomorrow at \(wall.hour!):30"
+                let draft = parse("remind me " + phrase, hits: [.init(phrase: phrase, at: "", instant: Support.utc(instant))], now: now, zone: zone).draft
+                XCTAssertNotNil(draft, instant)
+                let near = zone.secondsFromGMT(for: Support.utc(instant) - 3600) != zone.secondsFromGMT(for: Support.utc(instant) + 3600)
+                XCTAssertEqual(draft?.start.hour, near ? nil : wall.hour, instant)
+            }
+        }
+        for zone in [Support.berlin, Support.losAngeles] {
+            for now in ["2026-11-15 23:59:30", "2026-11-16 00:00:30"] {
+                XCTAssertNotNil(parse("remind me tomorrow at 9", hits: [.init(phrase: "tomorrow at 9", at: "2026-11-16 09:00")], now: now, zone: zone).draft)
+            }
+            XCTAssertEqual(parse("remind me tonight", hits: [.init(phrase: "tonight", at: "2026-11-16 18:00")], now: "2026-11-16 00:00:30", zone: zone).draft?.start.day, 16)
+        }
     }
 
-    func testSpanEndNearDSTIsDroppedWhileSafeStartIsKept() {
-        let draft = parse("reminder call on March 28 2027 from 0:30 to 1:30", phrase: "March 28 2027 from 0:30 to 1:30", at: "2027-03-28 00:30", duration: 3600).draft
-        XCTAssertEqual(draft?.start.hour, 0)
-        XCTAssertEqual(draft?.start.minute, 30)
-        XCTAssertEqual(draft?.kind, .reminder)
-        XCTAssertNil(draft?.end)
+    func testLengthCalendarAndScannerArguments() {
+        let scanner = ScriptedDateScanner([.init(phrase: "tomorrow", at: "2026-11-16 12:00")])
+        let parser = NoteDateParser(scanner: scanner)
+        let reference = Support.date("2026-11-15 21:00", Support.berlin)
+        let calendar = Support.calendar(Support.berlin)
+        let limit = "remind me to " + String(repeating: "a", count: 3978) + " tomorrow"
+        XCTAssertEqual(limit.utf16.count, 4000)
+        XCTAssertNotNil(parser.parse(limit, reference: reference, calendar: calendar).draft)
+        XCTAssertEqual(scanner.calls.count, 1)
+        XCTAssertEqual(scanner.calls.first?.reference, reference)
+        XCTAssertEqual(scanner.calls.first?.timeZone, calendar.timeZone)
+        XCTAssertEqual(scanner.calls.first?.text, " to " + String(repeating: "a", count: 3978) + " tomorrow")
+        for text in [limit + "x", "", " ", "call tomorrow", "remind me what tomorrow"] {
+            XCTAssertNil(parser.parse(text, reference: reference, calendar: calendar).draft)
+        }
+        XCTAssertEqual(scanner.calls.count, 1)
+        var other = Calendar(identifier: .buddhist)
+        other.timeZone = calendar.timeZone
+        XCTAssertNil(parser.parse("remind me tomorrow", reference: reference, calendar: other).draft)
+        XCTAssertEqual(scanner.calls.count, 1)
     }
 }

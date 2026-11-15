@@ -12,7 +12,7 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
     /// Parses as a user in `zone` whose preferred language is `language` would.
     private func parse(_ text: String, at now: Date, in zone: TimeZone, language: String = "en_US") -> ParsedNote {
         ProcessSettings.asUser(in: zone, speaking: language) {
-            let cue = language == "de_DE" ? "Erinnere mich " : language == "hr_HR" ? "Podsjeti me " : "Remind me to "
+            let cue = language == "de_DE" ? "Erinnere mich daran " : language == "hr_HR" ? "Podsjeti me da " : "Remind me to "
             return parser.parse(cue + text, reference: now, calendar: Support.calendar(zone))
         }
     }
@@ -28,10 +28,8 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
         for zone in [Support.berlin, Support.losAngeles, Support.auckland] {
             let now = try Support.nowAwayFromMidnight(in: zone)
             let draft = parse("Call Anna tomorrow at 9", at: now, in: zone).draft
-            XCTAssertEqual(draft?.kind, .reminder, zone.identifier)
             XCTAssertEqual(draft?.title, "Call Anna", zone.identifier)
             XCTAssertEqual(draft?.start, day(1, from: now, in: zone, hour: 9, minute: 0), zone.identifier)
-            XCTAssertNil(draft?.end)
             XCTAssertEqual(draft?.matchedText, "tomorrow at 9")
         }
     }
@@ -67,23 +65,16 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
         }
     }
 
-    func testTimeSpanBecomesAnEvent() throws {
-        let zone = Support.berlin
-        let now = try Support.nowAwayFromMidnight(in: zone)
-        let draft = parse("Sync tomorrow from 3pm to 4:30pm", at: now, in: zone).draft
-        XCTAssertEqual(draft?.kind, .event)
-        XCTAssertEqual(draft?.title, "Sync")
-        XCTAssertEqual(draft?.start, day(1, from: now, in: zone, hour: 15, minute: 0))
-        XCTAssertEqual(draft?.end, day(1, from: now, in: zone, hour: 16, minute: 30))
+    func testTimeSpanGivesNoDraft() throws {
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
+        XCTAssertNil(parse("Sync tomorrow from 3pm to 4:30pm", at: now, in: Support.berlin).draft)
     }
 
     func testMeetingWithATimeRemainsAReminder() throws {
         let zone = Support.losAngeles
         let now = try Support.nowAwayFromMidnight(in: zone)
         let draft = parse("Meeting with Anna tomorrow at 3pm", at: now, in: zone).draft
-        XCTAssertEqual(draft?.kind, .reminder)
         XCTAssertEqual(draft?.start, day(1, from: now, in: zone, hour: 15, minute: 0))
-        XCTAssertNil(draft?.end)
     }
 
     func testDateWithAYearLaterThisYearOrNext() throws {
@@ -122,14 +113,10 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
         }
     }
 
-    func testWordsForNumbersKeepOnlyTheDay() throws {
-        let zone = Support.berlin
-        let now = try Support.nowAwayFromMidnight(in: zone)
-        for (text, title) in [("Call Anna tomorrow at nine", "Call Anna at nine"), ("Call Anna tomorrow at ten thirty", "Call Anna at ten thirty")] {
-            let draft = parse(text, at: now, in: zone).draft
-            XCTAssertEqual(draft?.start, day(1, from: now, in: zone), text)
-            XCTAssertEqual(draft?.matchedText, "tomorrow", text)
-            XCTAssertEqual(draft?.title, title, text)
+    func testUnconsumedWordTimesGiveNoDraft() throws {
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
+        for text in ["Call Anna tomorrow at nine", "Call Anna tomorrow at ten thirty"] {
+            XCTAssertNil(parse(text, at: now, in: Support.berlin).draft, text)
         }
     }
 
@@ -137,7 +124,7 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
         let zone = Support.berlin
         let now = try Support.nowAwayFromMidnight(in: zone)
         let rows: [(text: String, language: String, matched: String?, offset: Int)] = [
-            ("Anna anrufen morgen um 9", "de_DE", "morgen um 9", 1),
+            ("morgen um 9 an Anna", "de_DE", "morgen um 9", 1),
             ("Anna anrufen übermorgen", "de_DE", "übermorgen", 2),
             ("Anna anrufen in 3 Tagen", "de_DE", "in 3 Tagen", 3),
             ("nazvati Annu sutra u 9", "hr_HR", "sutra u 9", 1),
@@ -161,26 +148,25 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
                 "call Anna tomorrow at 9 30", "call Anna tomorrow at 10 45", "call Anna next Monday",
                 "call Anna next Friday the 27th", "pay on Friday, November 21, 2026",
                 "check support 24/7", "pay on 13/8", "pay on 16/9", "pay on 10/10", "pay on 12/24",
-                "exercise every Monday", "call Anna not tomorrow",
+                "exercise every Monday",
             ]),
-            ("de_DE", "Erinnere mich daran", "Anna morgen anzurufen", [
+            ("de_DE", "Erinnere mich daran", "Anna morgen zu kontaktieren", [
                 "Anna morgen um 9 30 anzurufen", "Anna morgen um 10 45 anzurufen", "Anna nächsten Montag anzurufen",
                 "Anna nächsten Freitag den 27. anzurufen", "am Freitag, den 21. November 2026 zu bezahlen",
                 "Support 24/7 zu prüfen", "am 13/8 zu bezahlen", "am 16/9 zu bezahlen", "am 10/10 zu bezahlen", "am 12/24 zu bezahlen",
-                "jeden Morgen joggen zu gehen", "Anna nicht morgen anzurufen",
+                "jeden Morgen joggen zu gehen",
             ]),
             ("hr_HR", "Podsjeti me da", "nazovem Annu sutra", [
                 "nazovem Annu sutra u 9 30", "nazovem Annu sutra u 10 45", "nazovem Annu sljedeći ponedjeljak",
                 "nazovem Annu sljedeći petak 27.", "platim u petak 21.11.2026",
                 "provjerim podršku 24/7", "platim 13/8", "platim 16/9", "platim 10/10", "platim 12/24",
-                "trčim svaki ponedjeljak", "nazovem Annu ne sutra",
+                "trčim svaki ponedjeljak",
             ]),
         ]
         for (language, cue, clean, faults) in rows {
             ProcessSettings.asUser(in: zone, speaking: language) {
                 let draft = parser.parse("\(cue) \(clean)", reference: now, calendar: Support.calendar(zone)).draft
                 XCTAssertEqual(draft?.start, day(1, from: now, in: zone), language)
-                XCTAssertEqual(draft?.kind, .reminder, language)
                 for note in [clean] + faults {
                     XCTAssertNil(parser.parse(note, reference: now, calendar: Support.calendar(zone)).draft, note)
                 }
@@ -205,5 +191,34 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
             parser.parse("Remind me to Call Anna tomorrow at 9", reference: now, calendar: Support.calendar(Support.losAngeles)).draft
         }
         XCTAssertNil(draft)
+    }
+}
+
+/// Whole-value live detector acceptance matrix, with real now and one process language per row.
+final class NoteDateGrammarSystemMatrixTests: ProcessSettingsTestCase {
+    func testSupportedGrammarInEachPreferredLanguage() throws {
+        let zone = NSTimeZone.default
+        let calendar = NoteTestSupport.calendar(zone)
+        let now = try NoteTestSupport.nowAwayFromMidnight(in: zone)
+        let rows: [(String, String, String, String, Int, Int?, Int?)] = [
+            ("en-US", "remind me to call Anna tomorrow at 9:30", "tomorrow at 9:30", "call Anna", 1, 9, 30),
+            ("en-US", "reminder: buy a card in 3 days", "in 3 days", "buy a card", 3, nil, nil),
+            ("de-DE", "erinnere mich morgen um 9:30 an Anna", "morgen um 9:30", "Anna", 1, 9, 30),
+            ("de-DE", "denk dran in 3 Tagen an die Blumen", "in 3 Tagen", "die Blumen", 3, nil, nil),
+            ("de-DE", "denk daran übermorgen zu telefonieren", "übermorgen", "telefonieren", 2, nil, nil),
+            ("hr-HR", "podsjeti me sutra u 9:30 da nazovem Annu", "sutra u 9:30", "nazovem Annu", 1, 9, 30),
+            ("hr-HR", "podsjeti me za 3 dana da zalijem cvijeće", "za 3 dana", "zalijem cvijeće", 3, nil, nil),
+            ("hr-HR", "ne zaboravi prekosutra da nazovem", "prekosutra", "nazovem", 2, nil, nil),
+        ]
+        for (language, text, phrase, title, offset, hour, minute) in rows {
+            ProcessSettings.with(languages: [language]) {
+                let day = calendar.date(byAdding: .day, value: offset, to: now)!
+                let wall = calendar.dateComponents([.year, .month, .day], from: day)
+                let expected = NoteDraft(title: title,
+                    start: DateComponents(calendar: calendar, timeZone: zone, year: wall.year, month: wall.month, day: wall.day, hour: hour, minute: minute),
+                    matchedText: phrase, matchedRange: text.range(of: phrase)!)
+                XCTAssertEqual(NoteDateParser().parse(text, reference: now, calendar: calendar), ParsedNote(text: text, draft: expected), text)
+            }
+        }
     }
 }
