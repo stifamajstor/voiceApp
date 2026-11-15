@@ -16,6 +16,8 @@ import Foundation
 ///   calendar's zone are dropped, because the wall time may not exist or may occur twice.
 public struct NoteDateParser: Sendable {
     public static let maximumTitleLength = 100
+    public static let maximumNoteLength = 4_000
+    private static let horizonInYears = 2
 
     public let scanner: any DateScanner
 
@@ -30,14 +32,25 @@ public struct NoteDateParser: Sendable {
     private static let wallUnits: Set<Calendar.Component> = [.year, .month, .day, .hour, .minute, .second]
 
     private func draft(for text: String, reference: Date, calendar: Calendar, locale: Locale) -> NoteDraft? {
+        guard calendar.identifier == .gregorian,
+              text.utf16.count <= Self.maximumNoteLength,
+              !text.allSatisfy(\.isWhitespace)
+        else { return nil }
         let found = scanner.scan(text, reference: reference, timeZone: calendar.timeZone, locale: locale)
-        guard found.count == 1, let hit = found.first else { return nil }
+        guard let hit = found.first,
+              found.allSatisfy({ $0.date == hit.date && $0.duration == hit.duration && Self.isUsablePhrase(text[$0.range], $0) })
+        else { return nil }
         let matchedText = String(text[hit.range])
         let reading = ClockReading(matchedText)
 
         let wall = calendar.dateComponents(Self.wallUnits, from: hit.date)
         let isTimed = reading.explains(wall)
         if !isTimed && wall.hour == 0 && wall.minute == 0 && wall.second == 0 { return nil }
+        if Self.rolledOver(wall, phrase: matchedText, calendar: calendar) { return nil }
+
+        let isPast = isTimed ? hit.date <= reference : calendar.startOfDay(for: hit.date) < calendar.startOfDay(for: reference)
+        if isPast { return nil }
+        if let limit = calendar.date(byAdding: .year, value: Self.horizonInYears, to: reference), hit.date > limit { return nil }
 
         var end: DateComponents?
         if isTimed, hit.duration > 0, hit.duration <= 86_400 {
@@ -59,6 +72,45 @@ public struct NoteDateParser: Sendable {
         DateComponents(
             calendar: calendar, timeZone: calendar.timeZone, year: wall.year, month: wall.month, day: wall.day,
             hour: withTime ? wall.hour : nil, minute: withTime ? wall.minute : nil)
+    }
+
+    // MARK: Phrases that must not become a draft
+
+    private static let timeWords = Pattern(#"(?<![A-Za-z])(?:at|from|to|until|till|around|by|between|and|am|pm|a\.m\.|p\.m\.|o'clock|uhr)(?![A-Za-z])"#)
+    private static let fullNumericDate = Pattern(#"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}"#)
+    private static let dayAndMonthOrder = Pattern(#"(?<![\d/.-])(\d{1,2})[/.-](\d{1,2})(?:[/.-]\d{2,4})?(?!\d)(?!\s*[ap]\.?m)"#)
+    private static let lateMonthDay = Pattern(#"(?<!\d)(29|30|31)(?!\d)"#)
+
+    private static func isUsablePhrase(_ phrase: Substring, _ scanned: ScannedDate) -> Bool {
+        let phrase = String(phrase)
+        return !scanned.namesTimeZone && !isClockTimeOnly(phrase) && !hasAmbiguousDayAndMonth(phrase)
+    }
+
+    /// "9am", "10:30", "from 3pm to 4pm": a time with no day. The detector would put it today, which is a guess.
+    private static func isClockTimeOnly(_ phrase: String) -> Bool {
+        guard fullNumericDate.firstMatch(in: phrase) == nil else { return false }
+        let letters = timeWords.replacing(in: phrase, with: "")
+        return letters.allSatisfy { "0123456789:.-–".contains($0) || $0.isWhitespace }
+    }
+
+    /// "3/4/2027" is March 4 or April 3 depending on the writer's region, and the detector follows the process
+    /// region rather than the locale it was given. Anything with a number above 12 in one slot is unambiguous.
+    private static func hasAmbiguousDayAndMonth(_ phrase: String) -> Bool {
+        dayAndMonthOrder.matches(in: phrase).contains { match in
+            let first = Int(phrase[match.groups[0]!])!, second = Int(phrase[match.groups[1]!])!
+            return first <= 12 && second <= 12 && first != second
+        }
+    }
+
+    /// The detector turns "February 30" into March 2. A 29, 30 or 31 in the phrase that is more than the previous
+    /// month has days, next to a resolved day of 1 to 3, is that rollover.
+    private static func rolledOver(_ wall: DateComponents, phrase: String, calendar: Calendar) -> Bool {
+        guard let day = wall.day, day <= 3, let month = wall.month, let year = wall.year,
+              let firstOfMonth = calendar.date(from: DateComponents(year: year, month: month, day: 1)),
+              let previous = calendar.date(byAdding: .month, value: -1, to: firstOfMonth),
+              let daysBefore = calendar.range(of: .day, in: .month, for: previous)?.count
+        else { return false }
+        return lateMonthDay.matches(in: phrase).contains { Int(phrase[$0.groups[0]!])! > daysBefore }
     }
 
     // MARK: Event keywords
@@ -162,5 +214,9 @@ private struct Pattern {
 
     func firstMatch(in text: String) -> Range<String.Index>? {
         matches(in: text).first?.range
+    }
+
+    func replacing(in text: String, with template: String) -> String {
+        expression.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
     }
 }

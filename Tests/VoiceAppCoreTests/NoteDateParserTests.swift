@@ -260,4 +260,162 @@ final class NoteDateParserTests: XCTestCase {
                  expected: .init(title: "Recall the appointmentsheet", start: "2026-11-16 09:00", matched: "tomorrow at 9")),
         ])
     }
+
+    // MARK: No draft
+
+    func testNoDraftWhenNoDateIsFound() {
+        run([
+            Case(name: "plain note", now: Self.sunday, text: "Buy milk", hits: [], expected: nil),
+            Case(name: "empty", now: Self.sunday, text: "", hits: [], expected: nil),
+            Case(name: "whitespace only", now: Self.sunday, text: "  \n\t  ", hits: [hit("tomorrow", "2026-11-16 12:00")], expected: nil),
+            Case(name: "next week is not known to the detector", now: Self.sunday, text: "Plan the sprint next week", hits: [], expected: nil),
+            Case(name: "end of the month is not known to the detector", now: Self.sunday, text: "Pay rent at the end of the month", hits: [], expected: nil),
+            Case(name: "in two hours is not known to the detector", now: Self.sunday, text: "Call Anna in two hours", hits: [], expected: nil),
+            Case(name: "the 13th alone is not known to the detector", now: Self.sunday, text: "Pay rent on the 13th", hits: [], expected: nil),
+        ])
+    }
+
+    func testNoDraftForATimeWithoutADay() {
+        run([
+            Case(name: "9am", now: Self.sunday, text: "Call Anna at 9am", hits: [hit("9am", "2026-11-16 09:00")], expected: nil),
+            Case(name: "10:30", now: Self.sunday, text: "Call Anna at 10:30", hits: [hit("10:30", "2026-11-15 22:30")], expected: nil),
+            Case(name: "o'clock", now: Self.sunday, text: "Call Anna at 9 o'clock", hits: [hit("9 o'clock", "2026-11-16 09:00")], expected: nil),
+            Case(name: "dotted time", now: Self.sunday, text: "Call Anna at 9.30", hits: [hit("9.30", "2026-11-16 09:30")], expected: nil),
+            Case(name: "span without a day", now: Self.sunday, text: "Sync from 3pm to 4pm", hits: [hit("from 3pm to 4pm", "2026-11-16 15:00", duration: 3600)], expected: nil),
+            Case(name: "dashed span without a day", now: Self.sunday, text: "Sync 3-4pm", hits: [hit("3-4pm", "2026-11-16 15:00", duration: 3600)], expected: nil),
+            Case(name: "German time without a day", now: Self.sunday, locale: "de_DE", text: "um 9 Uhr anrufen", hits: [hit("9 Uhr", "2026-11-16 09:00")], expected: nil),
+            Case(name: "Croatian clock time the detector finds under an English locale", now: Self.sunday, text: "sutra u 10:30",
+                 hits: [hit("10:30", "2026-11-15 22:30")], expected: nil),
+            Case(name: "a dotted date is not a time", now: "2026-10-01 09:00", text: "Pay 13.11.2026",
+                 hits: [hit("13.11.2026", "2026-11-13 12:00")],
+                 expected: .init(title: "Pay", start: "2026-11-13", matched: "13.11.2026")),
+        ])
+    }
+
+    func testNoDraftForADateInThePast() {
+        run([
+            Case(name: "earlier this month", now: Self.sunday, text: "Call Anna on November 13", hits: [hit("November 13", "2026-11-13 12:00")], expected: nil),
+            Case(name: "yesterday", now: Self.sunday, text: "Call Anna yesterday", hits: [hit("yesterday", "2026-11-14 12:00")], expected: nil),
+            Case(name: "last Friday", now: Self.sunday, text: "Met Anna last Friday", hits: [hit("last Friday", "2026-11-06 12:00")], expected: nil),
+            Case(name: "earlier today", now: Self.sunday, text: "Call Anna today at 9", hits: [hit("today at 9", "2026-11-15 09:00")], expected: nil),
+            Case(name: "exactly now", now: Self.sunday, text: "Call Anna today at 21:00", hits: [hit("today at 21:00", "2026-11-15 21:00")], expected: nil),
+            Case(name: "one minute ahead", now: Self.sunday, text: "Call Anna today at 21:01", hits: [hit("today at 21:01", "2026-11-15 21:01")],
+                 expected: .init(title: "Call Anna", start: "2026-11-15 21:01", matched: "today at 21:01")),
+            Case(name: "a year ago", now: Self.sunday, text: "Born on November 13, 2025", hits: [hit("November 13, 2025", "2025-11-13 12:00")], expected: nil),
+        ])
+    }
+
+    func testNoDraftForADateMoreThanTwoYearsAway() {
+        run([
+            Case(name: "on the limit", now: Self.sunday, text: "Party on Nov 15 2028", hits: [hit("Nov 15 2028", "2028-11-15 12:00")],
+                 expected: .init(title: "Party", start: "2028-11-15", matched: "Nov 15 2028")),
+            Case(name: "a day past the limit", now: Self.sunday, text: "Party on Nov 16 2028", hits: [hit("Nov 16 2028", "2028-11-16 12:00")], expected: nil),
+            Case(name: "far away", now: Self.sunday, text: "Party on November 13, 2030", hits: [hit("November 13, 2030", "2030-11-13 12:00")], expected: nil),
+        ])
+    }
+
+    func testNoDraftWhenSeveralDifferentDatesAreFound() {
+        run([
+            Case(name: "two days with times", now: Self.sunday, text: "Monday at 9 and Tuesday at 10",
+                 hits: [hit("Monday at 9", "2026-11-16 09:00"), hit("Tuesday at 10", "2026-11-17 10:00")], expected: nil),
+            Case(name: "either of two days", now: Self.sunday, text: "Friday or Saturday",
+                 hits: [hit("Friday", "2026-11-20 12:00"), hit("Saturday", "2026-11-21 12:00")], expected: nil),
+            Case(name: "a day and a time apart from it", now: Self.sunday, text: "Meeting Friday, starts at 9am",
+                 hits: [hit("Friday", "2026-11-20 12:00"), hit("9am", "2026-11-16 09:00")], expected: nil),
+            Case(name: "tomorrow and the day after", now: Self.sunday, text: "tomorrow and the day after tomorrow",
+                 hits: [hit("tomorrow", "2026-11-16 12:00"), hit("the day after tomorrow", "2026-11-17 12:00")], expected: nil),
+            Case(name: "the same day twice is one date", now: Self.sunday, text: "Tomorrow I will do it tomorrow",
+                 hits: [hit("Tomorrow", "2026-11-16 12:00"), hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "I will do it tomorrow", start: "2026-11-16", matched: "Tomorrow")),
+        ])
+    }
+
+    func testNoDraftWhenTheDetectorRolledAnImpossibleDateForward() {
+        run([
+            Case(name: "February 30", now: "2027-01-10 12:00", text: "Pay on February 30", hits: [hit("February 30", "2027-03-02 12:00")], expected: nil),
+            Case(name: "February 29 in a common year", now: Self.sunday, text: "Party on Feb 29 2027", hits: [hit("Feb 29 2027", "2027-03-01 12:00")], expected: nil),
+            Case(name: "November 31", now: Self.sunday, text: "Pay on November 31", hits: [hit("November 31", "2026-12-01 12:00")], expected: nil),
+            Case(name: "April 31", now: "2027-03-10 12:00", text: "Pay on 31 April", hits: [hit("31 April", "2027-05-01 12:00")], expected: nil),
+            Case(name: "numeric 02/30/2027", now: "2027-01-10 12:00", text: "Pay on 02/30/2027", hits: [hit("02/30/2027", "2027-03-02 12:00")], expected: nil),
+            Case(name: "the 31st of a month that has one", now: Self.sunday, text: "Pay on December 31", hits: [hit("December 31", "2026-12-31 12:00")],
+                 expected: .init(title: "Pay", start: "2026-12-31", matched: "December 31")),
+        ])
+    }
+
+    func testNoDraftForNumericDatesWhoseDayAndMonthCouldBeSwapped() {
+        run([
+            Case(name: "3/4/2027", now: Self.sunday, text: "Pay on 3/4/2027", hits: [hit("3/4/2027", "2027-03-04 12:00")], expected: nil),
+            Case(name: "03.04.2027", now: Self.sunday, text: "Pay on 03.04.2027", hits: [hit("03.04.2027", "2027-04-03 12:00")], expected: nil),
+            Case(name: "3-4-2027", now: Self.sunday, text: "Pay on 3-4-2027", hits: [hit("3-4-2027", "2027-03-04 12:00")], expected: nil),
+            Case(name: "3/4/27", now: Self.sunday, text: "Pay on 3/4/27", hits: [hit("3/4/27", "2027-03-04 12:00")], expected: nil),
+            Case(name: "4/5 with no year", now: Self.sunday, text: "Pay on 4/5", hits: [hit("4/5", "2027-04-05 12:00")], expected: nil),
+            Case(name: "13/3/2027 can only be day first", now: Self.sunday, text: "Pay on 13/3/2027", hits: [hit("13/3/2027", "2027-03-13 12:00")],
+                 expected: .init(title: "Pay", start: "2027-03-13", matched: "13/3/2027")),
+            Case(name: "3/13/2027 can only be month first", now: Self.sunday, text: "Pay on 3/13/2027", hits: [hit("3/13/2027", "2027-03-13 12:00")],
+                 expected: .init(title: "Pay", start: "2027-03-13", matched: "3/13/2027")),
+            Case(name: "3/3/2027 reads the same both ways", now: Self.sunday, text: "Pay on 3/3/2027", hits: [hit("3/3/2027", "2027-03-03 12:00")],
+                 expected: .init(title: "Pay", start: "2027-03-03", matched: "3/3/2027")),
+            Case(name: "11/13 with no year", now: "2026-10-01 09:00", text: "Pay on 11/13", hits: [hit("11/13", "2026-11-13 12:00")],
+                 expected: .init(title: "Pay", start: "2026-11-13", matched: "11/13")),
+            Case(name: "a dashed span after a day is not a date", now: Self.sunday, text: "Sync tomorrow 3-4pm",
+                 hits: [hit("tomorrow 3-4pm", "2026-11-16 15:00", duration: 3600)],
+                 expected: .init(title: "Sync", start: "2026-11-16", matched: "tomorrow 3-4pm")),
+        ])
+    }
+
+    func testNoDraftWhenThePhraseNamesItsOwnTimeZone() {
+        run([
+            Case(name: "9am PST", now: Self.sunday, text: "Call Anna tomorrow at 9am PST",
+                 hits: [.init(phrase: "tomorrow at 9am PST", at: "2026-11-16 18:00", namesTimeZone: true)], expected: nil),
+        ])
+    }
+
+    func testNoDraftForAnUnsupportedCalendar() {
+        let reference = Support.date(Self.sunday, Support.berlin)
+        var buddhist = Calendar(identifier: .buddhist)
+        buddhist.timeZone = Support.berlin
+        let parsed = NoteDateParser(scanner: ScriptedScanner([hit("tomorrow", "2026-11-16 12:00")]))
+            .parse("Buy milk tomorrow", reference: reference, calendar: buddhist, locale: Support.en)
+        XCTAssertNil(parsed.draft)
+    }
+
+    // MARK: Hostile input
+
+    func testVeryLongNotesAreNotScanned() {
+        let scanner = ScriptedScanner([hit("tomorrow", "2026-11-16 12:00")])
+        let parser = NoteDateParser(scanner: scanner)
+        let reference = Support.date(Self.sunday, Support.berlin)
+        let calendar = Support.calendar(Support.berlin)
+
+        let tooLong = String(repeating: "a", count: NoteDateParser.maximumNoteLength - 8) + " tomorrow"
+        XCTAssertNil(parser.parse(tooLong, reference: reference, calendar: calendar, locale: Support.en).draft)
+        XCTAssertEqual(scanner.calls.count, 0)
+
+        let atTheLimit = String(repeating: "a", count: NoteDateParser.maximumNoteLength - 9) + " tomorrow"
+        XCTAssertEqual(atTheLimit.utf16.count, NoteDateParser.maximumNoteLength)
+        let draft = parser.parse(atTheLimit, reference: reference, calendar: calendar, locale: Support.en).draft
+        XCTAssertNotNil(draft)
+        XCTAssertEqual(scanner.calls.count, 1)
+    }
+
+    func testBlankNotesAreNotScanned() {
+        let scanner = ScriptedScanner([hit("tomorrow", "2026-11-16 12:00")])
+        let parser = NoteDateParser(scanner: scanner)
+        for text in ["", " ", "\n\n", " \t\n "] {
+            XCTAssertNil(parser.parse(text, reference: Support.date(Self.sunday, Support.berlin), calendar: Support.calendar(Support.berlin), locale: Support.en).draft)
+        }
+        XCTAssertEqual(scanner.calls.count, 0)
+    }
+
+    func testScannerGetsTheCallersReferenceZoneAndLocale() {
+        let scanner = ScriptedScanner([])
+        let reference = Support.date(Self.sunday, Support.losAngeles)
+        _ = NoteDateParser(scanner: scanner)
+            .parse("Buy milk tomorrow", reference: reference, calendar: Support.calendar(Support.losAngeles), locale: Locale(identifier: "hr_HR"))
+        XCTAssertEqual(scanner.calls.count, 1)
+        XCTAssertEqual(scanner.calls.first?.text, "Buy milk tomorrow")
+        XCTAssertEqual(scanner.calls.first?.reference, reference)
+        XCTAssertEqual(scanner.calls.first?.timeZone, Support.losAngeles)
+        XCTAssertEqual(scanner.calls.first?.locale.identifier, "hr_HR")
+    }
 }
