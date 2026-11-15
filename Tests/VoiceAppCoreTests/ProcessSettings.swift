@@ -62,14 +62,22 @@ enum ProcessSettings {
 /// reported where it happens and cannot reach the tests that run after it.
 class ProcessSettingsTestCase: XCTestCase {
     private var settingsAtStart: ProcessSettings.Snapshot?
+    private var zoneAtStart: TimeZone?
+    private var argumentsAtStart: [String: Any]?
 
     override func setUp() {
         super.setUp()
         settingsAtStart = ProcessSettings.Snapshot.take()
+        zoneAtStart = NSTimeZone.default
+        argumentsAtStart = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
     }
 
     override func tearDown() {
-        XCTAssertEqual(ProcessSettings.Snapshot.take(), settingsAtStart, "the test left process settings changed")
+        let after = ProcessSettings.Snapshot.take()
+        // XCTest can stop at a failed assertion without running defer blocks, so restore before reporting it.
+        if let zoneAtStart { NSTimeZone.default = zoneAtStart }
+        if let argumentsAtStart { UserDefaults.standard.setVolatileDomain(argumentsAtStart, forName: UserDefaults.argumentDomain) }
+        XCTAssertEqual(after, settingsAtStart, "the test left process settings changed")
         super.tearDown()
     }
 }

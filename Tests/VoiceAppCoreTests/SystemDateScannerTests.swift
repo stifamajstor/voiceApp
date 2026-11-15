@@ -10,6 +10,13 @@ import XCTest
 final class SystemDateScannerTests: ProcessSettingsTestCase {
     private typealias Support = NoteTestSupport
     private let scanner = SystemDateScanner()
+    private var expectingLeak = false
+    private var settingsAtLeak: ProcessSettings.Snapshot?
+
+    override func record(_ issue: XCTIssue) {
+        if expectingLeak { settingsAtLeak = ProcessSettings.Snapshot.take() }
+        else { super.record(issue) }
+    }
 
     /// The scanner as a user in `timeZone` speaking `localeID` would have it, asked to resolve in that same zone.
     private func scan(_ text: String, at now: Date, in timeZone: TimeZone, speaking localeID: String = "en_US") -> [ScannedDate] {
@@ -163,6 +170,69 @@ final class SystemDateScannerTests: ProcessSettingsTestCase {
                 scanner.scan("tomorrow at 9", reference: now, timeZone: requested)
             }
             XCTAssertEqual(found, [], requested.identifier)
+        }
+    }
+
+    /// Synthetic zones isolate offset checks independently of the installed time-zone database.
+    private final class SyntheticZone: NSTimeZone, @unchecked Sendable {
+        let initial: Int
+        let changes: [(Date, Int)]
+        let transitions: [Date]
+
+        init(initial: Int = 0, changes: [(Date, Int)], transitions: [Date]) {
+            self.initial = initial
+            self.changes = changes
+            self.transitions = transitions
+            super.init()
+        }
+
+        required init?(coder: NSCoder) { fatalError("not archived") }
+        override var name: String { "Synthetic" }
+        override func secondsFromGMT(for date: Date) -> Int {
+            changes.last { $0.0 <= date }?.1 ?? initial
+        }
+        override func nextDaylightSavingTimeTransition(after date: Date) -> Date? {
+            transitions.first { $0 > date }
+        }
+    }
+
+    func testZoneEndOffsetIsCheckedEvenWithoutReportedDSTTransitions() {
+        let reference = Support.utc("2026-11-15 12:00")
+        let change = reference + 86_400
+        let first = SyntheticZone(changes: [], transitions: []) as TimeZone
+        let second = SyntheticZone(changes: [(change, 3600)], transitions: []) as TimeZone
+        XCTAssertEqual(first.secondsFromGMT(for: reference), second.secondsFromGMT(for: reference))
+        XCTAssertNil(second.nextDaylightSavingTimeTransition(after: reference))
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(first, second, around: reference))
+    }
+
+    func testMatchingTransitionInstantsMustHaveMatchingOffsetsAfterwards() {
+        let reference = Support.utc("2026-11-15 12:00")
+        let spring = reference + 86_400, autumn = reference + 2 * 86_400
+        let first = SyntheticZone(changes: [(spring, 3600), (autumn, 0)], transitions: [spring, autumn]) as TimeZone
+        let second = SyntheticZone(changes: [(spring, 7200), (autumn, 0)], transitions: [spring, autumn]) as TimeZone
+        XCTAssertEqual(first.secondsFromGMT(for: reference), second.secondsFromGMT(for: reference))
+        XCTAssertEqual(first.secondsFromGMT(for: autumn), second.secondsFromGMT(for: autumn))
+        XCTAssertEqual(first.nextDaylightSavingTimeTransition(after: reference), second.nextDaylightSavingTimeTransition(after: reference))
+        XCTAssertFalse(SystemDateScanner.resolvesAlike(first, second, around: reference))
+    }
+
+    func testLeakedSettingsAreRestoredBeforeFailureIsReported() {
+        final class LeakingTest: ProcessSettingsTestCase {}
+        let before = ProcessSettings.Snapshot.take()
+        ProcessSettings.with {
+            let test = LeakingTest(selector: #selector(LeakingTest.tearDown))
+            test.continueAfterFailure = false
+            test.setUp()
+            NSTimeZone.default = Support.auckland
+            var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+            arguments["AppleLanguages"] = ["hr-HR"]
+            UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+            expectingLeak = true
+            test.tearDown()
+            expectingLeak = false
+            XCTAssertEqual(settingsAtLeak, before)
+            XCTAssertEqual(ProcessSettings.Snapshot.take(), before)
         }
     }
 

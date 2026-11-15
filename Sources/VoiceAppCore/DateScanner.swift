@@ -42,9 +42,9 @@ public protocol DateScanner: Sendable {
 ///   wrong day. The clock and the zone check are repeated after the scan.
 ///
 /// Callers therefore pass the current time as `reference` and the system's own calendar. The process time zone is
-/// read when the app starts, so a change of the system zone while the app runs makes the scanner refuse until the
-/// process zone is reset. The `clock` and `processTimeZone` parameters exist only so these checks can be tested and
-/// must read the system in production.
+/// read on every check. When Foundation resets its cached system zone, the caller's system calendar and detector
+/// can switch together; a system zone change does not necessarily make the scanner refuse. The `clock` and
+/// `processTimeZone` parameters exist only so these checks can be tested and must read the system in production.
 ///
 /// The detector reads all preferred languages, so phrases in any of them can match, and the region is the process
 /// region: the day/month order of numeric dates ("3/4/2027") follows it. `NoteDateParser` refuses those.

@@ -12,7 +12,8 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
     /// Parses as a user in `zone` whose preferred language is `language` would.
     private func parse(_ text: String, at now: Date, in zone: TimeZone, language: String = "en_US") -> ParsedNote {
         ProcessSettings.asUser(in: zone, speaking: language) {
-            parser.parse(text, reference: now, calendar: Support.calendar(zone))
+            let cue = language == "de_DE" ? "Erinnere mich " : language == "hr_HR" ? "Podsjeti me " : "Remind me to "
+            return parser.parse(cue + text, reference: now, calendar: Support.calendar(zone))
         }
     }
 
@@ -76,11 +77,11 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
         XCTAssertEqual(draft?.end, day(1, from: now, in: zone, hour: 16, minute: 30))
     }
 
-    func testMeetingWithATimeBecomesAnEventWithoutAnEnd() throws {
+    func testMeetingWithATimeRemainsAReminder() throws {
         let zone = Support.losAngeles
         let now = try Support.nowAwayFromMidnight(in: zone)
         let draft = parse("Meeting with Anna tomorrow at 3pm", at: now, in: zone).draft
-        XCTAssertEqual(draft?.kind, .event)
+        XCTAssertEqual(draft?.kind, .reminder)
         XCTAssertEqual(draft?.start, day(1, from: now, in: zone, hour: 15, minute: 0))
         XCTAssertNil(draft?.end)
     }
@@ -152,6 +153,44 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
         XCTAssertNil(parse("nazvati Annu sutra u 10:30", at: now, in: zone, language: "en_US").draft)
     }
 
+    func testExplicitCuesAndConsistencyInThreeLanguages() throws {
+        let zone = Support.berlin
+        let now = try Support.nowAwayFromMidnight(in: zone)
+        let rows = [
+            ("en_US", "Remind me to", "call Anna tomorrow", [
+                "call Anna tomorrow at 9 30", "call Anna tomorrow at 10 45", "call Anna next Monday",
+                "call Anna next Friday the 27th", "pay on Friday, November 21, 2026",
+                "check support 24/7", "pay on 13/8", "pay on 16/9", "pay on 10/10", "pay on 12/24",
+                "exercise every Monday", "call Anna not tomorrow",
+            ]),
+            ("de_DE", "Erinnere mich daran", "Anna morgen anzurufen", [
+                "Anna morgen um 9 30 anzurufen", "Anna morgen um 10 45 anzurufen", "Anna nächsten Montag anzurufen",
+                "Anna nächsten Freitag den 27. anzurufen", "am Freitag, den 21. November 2026 zu bezahlen",
+                "Support 24/7 zu prüfen", "am 13/8 zu bezahlen", "am 16/9 zu bezahlen", "am 10/10 zu bezahlen", "am 12/24 zu bezahlen",
+                "jeden Morgen joggen zu gehen", "Anna nicht morgen anzurufen",
+            ]),
+            ("hr_HR", "Podsjeti me da", "nazovem Annu sutra", [
+                "nazovem Annu sutra u 9 30", "nazovem Annu sutra u 10 45", "nazovem Annu sljedeći ponedjeljak",
+                "nazovem Annu sljedeći petak 27.", "platim u petak 21.11.2026",
+                "provjerim podršku 24/7", "platim 13/8", "platim 16/9", "platim 10/10", "platim 12/24",
+                "trčim svaki ponedjeljak", "nazovem Annu ne sutra",
+            ]),
+        ]
+        for (language, cue, clean, faults) in rows {
+            ProcessSettings.asUser(in: zone, speaking: language) {
+                let draft = parser.parse("\(cue) \(clean)", reference: now, calendar: Support.calendar(zone)).draft
+                XCTAssertEqual(draft?.start, day(1, from: now, in: zone), language)
+                XCTAssertEqual(draft?.kind, .reminder, language)
+                for note in [clean] + faults {
+                    XCTAssertNil(parser.parse(note, reference: now, calendar: Support.calendar(zone)).draft, note)
+                }
+                for note in faults {
+                    XCTAssertNil(parser.parse("\(cue) \(note)", reference: now, calendar: Support.calendar(zone)).draft, note)
+                }
+            }
+        }
+    }
+
     func testReferenceThatIsNotNowGivesNoDraft() throws {
         let zone = Support.berlin
         let now = try Support.nowAwayFromMidnight(in: zone)
@@ -163,7 +202,7 @@ final class NoteDateParserSystemTests: ProcessSettingsTestCase {
     func testCalendarInAnotherZoneThanTheSystemGivesNoDraft() throws {
         let now = try Support.nowAwayFromMidnight(in: Support.berlin)
         let draft = ProcessSettings.asUser(in: Support.berlin) {
-            parser.parse("Call Anna tomorrow at 9", reference: now, calendar: Support.calendar(Support.losAngeles)).draft
+            parser.parse("Remind me to Call Anna tomorrow at 9", reference: now, calendar: Support.calendar(Support.losAngeles)).draft
         }
         XCTAssertNil(draft)
     }
