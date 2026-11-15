@@ -22,3 +22,42 @@ jobs:
       - run: swift --version
       - run: swift build
       - run: swift test
+
+  packaging:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Own key: this job builds release/arm64 with the overlay, build-and-test builds debug.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .build
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode-26.2-packaging-${{ hashFiles('Package.resolved') }}
+      - run: swift --version
+      - name: Build app (first run)
+        run: scripts/build-app.sh
+      - name: Build app (second run, warm .build)
+        run: scripts/build-app.sh
+      - name: Resource overlay relocation test
+        run: scripts/test-resource-overlay.sh
+      # build-app.sh deletes a rejected app, so inspect the linked binary instead. The artifact
+      # check reads `dyld_info -disassemble`; this shows whether the runner's output has the
+      # expected shape (labels and `; selector "..."` comments) or the accessors are unpatched.
+      - name: Show disassembly of the resource accessors
+        if: failure()
+        run: |
+          set +e
+          xcodebuild -version
+          BIN="$(swift build -c release --arch arm64 --show-bin-path)/VoiceApp"
+          [ -x "$BIN" ] || { echo "No linked binary at $BIN; the failure came before linking"; exit 0; }
+          xcrun dyld_info -disassemble "$BIN" > "$RUNNER_TEMP/disassembly.txt"
+          echo "dyld_info exit status $?, $(wc -l < "$RUNNER_TEMP/disassembly.txt") lines"
+          echo "--- first 30 lines"
+          head -30 "$RUNNER_TEMP/disassembly.txt"
+          echo "--- Bundle.module initializer labels"
+          grep -n -E '^_\$sSo8NSBundleC[0-9]+.*E6module.*:$' "$RUNNER_TEMP/disassembly.txt" | head -20
+          echo "--- selectors inside each initializer"
+          awk '/:$/ { show = ($0 ~ /^_\$sSo8NSBundleC[0-9]+.*E6moduleABvpZfiAByXEfU_:$/) } show && (/:$/ || /; selector/)' "$RUNNER_TEMP/disassembly.txt" | head -200
+          echo "--- selector comment counts (expected format: ; selector \"name\")"
+          grep -o '; selector "[A-Za-z]*"' "$RUNNER_TEMP/disassembly.txt" | sort | uniq -c | sort -rn | head -10
