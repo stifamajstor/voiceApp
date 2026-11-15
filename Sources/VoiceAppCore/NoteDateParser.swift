@@ -44,7 +44,7 @@ public struct NoteDateParser: Sendable {
         let reading = ClockReading(matchedText)
 
         let wall = calendar.dateComponents(Self.wallUnits, from: hit.date)
-        let isTimed = reading.explains(wall)
+        let isTimed = reading.explains(wall) && !Self.isNearOffsetChange(hit.date, in: calendar.timeZone)
         if !isTimed && wall.hour == 0 && wall.minute == 0 && wall.second == 0 { return nil }
         if Self.rolledOver(wall, phrase: matchedText, calendar: calendar) { return nil }
 
@@ -54,8 +54,9 @@ public struct NoteDateParser: Sendable {
 
         var end: DateComponents?
         if isTimed, hit.duration > 0, hit.duration <= 86_400 {
-            let endWall = calendar.dateComponents(Self.wallUnits, from: hit.date + hit.duration)
-            if reading.explains(endWall) { end = Self.components(endWall, calendar: calendar, withTime: true) }
+            let endDate = hit.date + hit.duration
+            let endWall = calendar.dateComponents(Self.wallUnits, from: endDate)
+            if reading.explains(endWall) && !Self.isNearOffsetChange(endDate, in: calendar.timeZone) { end = Self.components(endWall, calendar: calendar, withTime: true) }
         }
 
         let isEvent = end != nil || (isTimed && Self.namesMeeting.firstMatch(in: text) != nil)
@@ -111,6 +112,12 @@ public struct NoteDateParser: Sendable {
               let daysBefore = calendar.range(of: .day, in: .month, for: previous)?.count
         else { return false }
         return lateMonthDay.matches(in: phrase).contains { Int(phrase[$0.groups[0]!])! > daysBefore }
+    }
+
+    /// The zone's UTC offset differs within an hour either side of `date`: the wall time is where clocks jump, so
+    /// it may not exist or may occur twice, and the instant the detector chose is one of two guesses.
+    private static func isNearOffsetChange(_ date: Date, in zone: TimeZone) -> Bool {
+        zone.secondsFromGMT(for: date - 3600) != zone.secondsFromGMT(for: date + 3600)
     }
 
     // MARK: Event keywords

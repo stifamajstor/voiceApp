@@ -418,4 +418,138 @@ final class NoteDateParserTests: XCTestCase {
         XCTAssertEqual(scanner.calls.first?.timeZone, Support.losAngeles)
         XCTAssertEqual(scanner.calls.first?.locale.identifier, "hr_HR")
     }
+
+    // MARK: Titles
+
+    func testTitleIsTheNoteWithoutTheDatePhrase() {
+        let sixtyWords = String(repeating: "word ", count: 30) + "tomorrow"
+        let nineteenWords = String(repeating: "word ", count: 19).trimmingCharacters(in: .whitespaces) + "…"
+        let oneHugeWord = String(repeating: "x", count: 200)
+        let exactlyOneHundred = String(repeating: "y", count: 100)
+        run([
+            Case(name: "preposition in front of the phrase goes with it", now: Self.sunday, text: "meeting with Anna on Friday at 2pm",
+                 hits: [hit("Friday at 2pm", "2026-11-20 14:00")],
+                 expected: .init(kind: .event, title: "meeting with Anna", start: "2026-11-20 14:00", matched: "Friday at 2pm")),
+            Case(name: "by", now: Self.sunday, text: "Submit report by Friday", hits: [hit("Friday", "2026-11-20 12:00")],
+                 expected: .init(title: "Submit report", start: "2026-11-20", matched: "Friday")),
+            Case(name: "due", now: Self.sunday, text: "Report due Friday", hits: [hit("Friday", "2026-11-20 12:00")],
+                 expected: .init(title: "Report", start: "2026-11-20", matched: "Friday")),
+            Case(name: "only one preposition goes", now: Self.sunday, text: "Call Anna for the party on Friday", hits: [hit("Friday", "2026-11-20 12:00")],
+                 expected: .init(title: "Call Anna for the party", start: "2026-11-20", matched: "Friday")),
+            Case(name: "punctuation around the phrase", now: Self.sunday, text: "Buy milk, tomorrow.", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "Buy milk", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "line breaks collapse", now: Self.sunday, text: "Buy milk\n\ntomorrow\nand eggs", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "Buy milk and eggs", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "phrase in the middle", now: Self.sunday, text: "Tell Anna tomorrow that the printer is broken", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "Tell Anna that the printer is broken", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "remind me to", now: Self.sunday, text: "Please remind me to call Anna tomorrow", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "call Anna", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "remind me about", now: Self.sunday, text: "Remind me about the rent on Friday", hits: [hit("Friday", "2026-11-20 12:00")],
+                 expected: .init(title: "the rent", start: "2026-11-20", matched: "Friday")),
+            Case(name: "nothing left after the request is dropped: the note itself", now: Self.sunday, text: "Remind me tomorrow",
+                 hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "Remind me tomorrow", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "only a date: the note itself", now: Self.sunday, text: "tomorrow", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "tomorrow", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "only a date with spaces and a full stop", now: Self.sunday, text: "  Tomorrow at 9. ", hits: [hit("Tomorrow at 9", "2026-11-16 09:00")],
+                 expected: .init(title: "Tomorrow at 9", start: "2026-11-16 09:00", matched: "Tomorrow at 9")),
+            Case(name: "long note is cut at a word", now: Self.sunday, text: sixtyWords, hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: nineteenWords, start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "long word is cut at the limit", now: Self.sunday, text: oneHugeWord + " tomorrow", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: String(repeating: "x", count: 99) + "…", start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "a title of exactly the limit is kept", now: Self.sunday, text: exactlyOneHundred + " tomorrow", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: exactlyOneHundred, start: "2026-11-16", matched: "tomorrow")),
+            Case(name: "emoji around the phrase", now: Self.sunday, text: "👩‍👩‍👧 Call Anna tomorrow at 9 🎉", hits: [hit("tomorrow at 9", "2026-11-16 09:00")],
+                 expected: .init(title: "👩‍👩‍👧 Call Anna 🎉", start: "2026-11-16 09:00", matched: "tomorrow at 9")),
+            Case(name: "accents", now: Self.sunday, locale: "de_DE", text: "Zürich anrufen am Freitag", hits: [hit("Freitag", "2026-11-20 12:00")],
+                 expected: .init(title: "Zürich anrufen am", start: "2026-11-20", matched: "Freitag")),
+        ])
+    }
+
+    // MARK: Daylight saving, midnight and time zones
+
+    func testWallTimesNearADaylightSavingChangeAreNotTrusted() {
+        func at(_ phrase: String, _ instant: String) -> ScriptedScanner.Hit {
+            .init(phrase: phrase, at: "", instant: Support.utc(instant))
+        }
+        run([
+            // Berlin springs forward on 2027-03-28: 02:00 CET becomes 03:00 CEST at 01:00 UTC.
+            Case(name: "Berlin: 2:30 does not exist, the detector says 3:30", now: "2027-03-27 23:59:30", text: "Call Anna tomorrow at 2:30",
+                 hits: [at("tomorrow at 2:30", "2027-03-28 01:30")],
+                 expected: .init(title: "Call Anna", start: "2027-03-28", matched: "tomorrow at 2:30")),
+            Case(name: "Berlin: 3:30 CEST is within an hour of the change", now: "2027-03-27 23:59:30", text: "Call Anna tomorrow at 3:30",
+                 hits: [at("tomorrow at 3:30", "2027-03-28 01:30")],
+                 expected: .init(title: "Call Anna", start: "2027-03-28", matched: "tomorrow at 3:30")),
+            Case(name: "Berlin: 4:00 CEST is clear of it", now: "2027-03-27 23:59:30", text: "Call Anna tomorrow at 4:00",
+                 hits: [at("tomorrow at 4:00", "2027-03-28 02:00")],
+                 expected: .init(title: "Call Anna", start: "2027-03-28 04:00", matched: "tomorrow at 4:00")),
+            Case(name: "Berlin: 9:00 on the day", now: "2027-03-27 23:59:30", text: "Call Anna tomorrow at 9",
+                 hits: [at("tomorrow at 9", "2027-03-28 07:00")],
+                 expected: .init(title: "Call Anna", start: "2027-03-28 09:00", matched: "tomorrow at 9")),
+            Case(name: "Berlin: a span that starts at the change is only a reminder", now: "2027-03-27 23:59:30", text: "Call with Anna tomorrow from 1am to 4am",
+                 hits: [.init(phrase: "tomorrow from 1am to 4am", at: "", duration: 7200, instant: Support.utc("2027-03-28 00:00"))],
+                 expected: .init(title: "Call with Anna", start: "2027-03-28", matched: "tomorrow from 1am to 4am")),
+            // Berlin falls back on 2027-10-31: 03:00 CEST becomes 02:00 CET at 01:00 UTC, so 2:30 happens twice.
+            Case(name: "Berlin: first 2:30", now: "2027-10-30 22:00", text: "Call Anna tomorrow at 2:30",
+                 hits: [at("tomorrow at 2:30", "2027-10-31 00:30")],
+                 expected: .init(title: "Call Anna", start: "2027-10-31", matched: "tomorrow at 2:30")),
+            Case(name: "Berlin: second 2:30", now: "2027-10-30 22:00", text: "Call Anna tomorrow at 2:30",
+                 hits: [at("tomorrow at 2:30", "2027-10-31 01:30")],
+                 expected: .init(title: "Call Anna", start: "2027-10-31", matched: "tomorrow at 2:30")),
+            Case(name: "Berlin: 9:00 on the fall-back day", now: "2027-10-30 22:00", text: "Call Anna tomorrow at 9",
+                 hits: [at("tomorrow at 9", "2027-10-31 08:00")],
+                 expected: .init(title: "Call Anna", start: "2027-10-31 09:00", matched: "tomorrow at 9")),
+            // Los Angeles springs forward on 2027-03-14: 02:00 PST becomes 03:00 PDT at 10:00 UTC.
+            Case(name: "Los Angeles: 2:30 does not exist", now: "2027-03-13 23:50", zone: Support.losAngeles, text: "Call Anna tomorrow at 2:30",
+                 hits: [at("tomorrow at 2:30", "2027-03-14 10:30")],
+                 expected: .init(title: "Call Anna", start: "2027-03-14", matched: "tomorrow at 2:30")),
+            Case(name: "Los Angeles: 9am on the day", now: "2027-03-13 23:50", zone: Support.losAngeles, text: "Call Anna tomorrow at 9am",
+                 hits: [at("tomorrow at 9am", "2027-03-14 16:00")],
+                 expected: .init(title: "Call Anna", start: "2027-03-14 09:00", matched: "tomorrow at 9am")),
+            // Los Angeles falls back on 2026-11-01: 02:00 PDT becomes 01:00 PST at 09:00 UTC, so 1:30 happens twice.
+            Case(name: "Los Angeles: first 1:30", now: "2026-10-31 23:30", zone: Support.losAngeles, text: "Call Anna tomorrow at 1:30",
+                 hits: [at("tomorrow at 1:30", "2026-11-01 08:30")],
+                 expected: .init(title: "Call Anna", start: "2026-11-01", matched: "tomorrow at 1:30")),
+            Case(name: "Los Angeles: second 1:30", now: "2026-10-31 23:30", zone: Support.losAngeles, text: "Call Anna tomorrow at 1:30",
+                 hits: [at("tomorrow at 1:30", "2026-11-01 09:30")],
+                 expected: .init(title: "Call Anna", start: "2026-11-01", matched: "tomorrow at 1:30")),
+        ])
+    }
+
+    func testReferenceJustBeforeOrAfterMidnight() {
+        for zone in [Support.berlin, Support.losAngeles] {
+            let id = zone.identifier
+            run([
+                Case(name: "\(id): tomorrow at 9 from 23:59:30", now: "2026-11-15 23:59:30", zone: zone, text: "Call Anna tomorrow at 9",
+                     hits: [hit("tomorrow at 9", "2026-11-16 09:00")],
+                     expected: .init(title: "Call Anna", start: "2026-11-16 09:00", matched: "tomorrow at 9")),
+                Case(name: "\(id): today is still today", now: "2026-11-15 23:59:30", zone: zone, text: "Buy milk today",
+                     hits: [hit("today", "2026-11-15 12:00")],
+                     expected: .init(title: "Buy milk", start: "2026-11-15", matched: "today")),
+                Case(name: "\(id): 23:59 has already gone", now: "2026-11-15 23:59:30", zone: zone, text: "Call Anna today at 11:59pm",
+                     hits: [hit("today at 11:59pm", "2026-11-15 23:59")], expected: nil),
+                Case(name: "\(id): just after midnight tonight is the new day", now: "2026-11-16 00:00:30", zone: zone, text: "Gym tonight",
+                     hits: [hit("tonight", "2026-11-16 18:00")],
+                     expected: .init(title: "Gym", start: "2026-11-16", matched: "tonight")),
+                Case(name: "\(id): just after midnight yesterday is the old day", now: "2026-11-16 00:00:30", zone: zone, text: "Gym yesterday",
+                     hits: [hit("yesterday", "2026-11-15 12:00")], expected: nil),
+                Case(name: "\(id): over New Year", now: "2026-12-31 23:59:30", zone: zone, text: "Call Anna tomorrow",
+                     hits: [hit("tomorrow", "2027-01-01 12:00")],
+                     expected: .init(title: "Call Anna", start: "2027-01-01", matched: "tomorrow")),
+                Case(name: "\(id): a month name already gone this year is not rolled to next year", now: "2026-12-20 09:00", zone: zone, text: "Call Anna on January 5",
+                     hits: [hit("January 5", "2026-01-05 12:00")], expected: nil),
+            ])
+        }
+    }
+
+    func testTheSameInstantIsADifferentDayInAnotherZone() {
+        let instant = Support.utc("2026-11-16 07:30")
+        let hit = ScriptedScanner.Hit(phrase: "Monday", at: "", instant: Support.utc("2026-11-16 22:30"))
+        for (zone, expected) in [(Support.berlin, "2026-11-16 23:30"), (Support.losAngeles, "2026-11-16 14:30")] {
+            let parsed = NoteDateParser(scanner: ScriptedScanner([hit]))
+                .parse("Call Anna Monday", reference: instant, calendar: Support.calendar(zone), locale: Support.en)
+            XCTAssertEqual(parsed.draft?.start.hour, nil, "date-only in \(zone.identifier)")
+            XCTAssertEqual(parsed.draft?.start, components(String(expected.prefix(10)), zone), zone.identifier)
+        }
+    }
 }

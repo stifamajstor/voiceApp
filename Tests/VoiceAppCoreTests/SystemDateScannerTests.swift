@@ -10,25 +10,14 @@ final class SystemDateScannerTests: XCTestCase {
     private let scanner = SystemDateScanner()
 
     private func phrases(_ text: String, _ localeID: String = "en_US", in timeZone: TimeZone = Support.berlin) throws -> [String] {
-        let now = try nowAwayFromMidnight(in: timeZone)
+        let now = try Support.nowAwayFromMidnight(in: timeZone)
         return scanner.scan(text, reference: now, timeZone: timeZone, locale: Locale(identifier: localeID))
             .map { String(text[$0.range]) }
     }
 
-    /// Skips when the real clock is close to a day boundary in `timeZone`, where "tomorrow" is a coin flip.
-    private func nowAwayFromMidnight(in timeZone: TimeZone) throws -> Date {
-        let now = Date()
-        let calendar = Support.calendar(timeZone)
-        let midnight = calendar.startOfDay(for: now)
-        let nextMidnight = calendar.date(byAdding: .day, value: 1, to: midnight)!
-        try XCTSkipIf(now.timeIntervalSince(midnight) < 300 || nextMidnight.timeIntervalSince(now) < 300,
-            "Within five minutes of midnight in \(timeZone.identifier)")
-        return now
-    }
-
     func testTomorrowAtNineResolvesInTheRequestedTimeZone() throws {
         for timeZone in [Support.berlin, Support.losAngeles, Support.auckland] {
-            let now = try nowAwayFromMidnight(in: timeZone)
+            let now = try Support.nowAwayFromMidnight(in: timeZone)
             let calendar = Support.calendar(timeZone)
             let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!
             let expected = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow)!
@@ -45,19 +34,19 @@ final class SystemDateScannerTests: XCTestCase {
     }
 
     func testTimeSpanCarriesItsDuration() throws {
-        let now = try nowAwayFromMidnight(in: Support.berlin)
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
         let found = scanner.scan("Sync tomorrow from 3pm to 4:30pm", reference: now, timeZone: Support.berlin, locale: Support.en)
         XCTAssertEqual(found.first?.duration, 5400)
     }
 
     func testExplicitTimeZoneInTheTextIsReported() throws {
-        let now = try nowAwayFromMidnight(in: Support.berlin)
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
         let found = scanner.scan("tomorrow at 9am PST", reference: now, timeZone: Support.berlin, locale: Support.en)
         XCTAssertEqual(found.first?.namesTimeZone, true)
     }
 
     func testReferenceThatIsNotTheSystemClockYieldsNothing() throws {
-        let now = try nowAwayFromMidnight(in: Support.berlin)
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
         for offset: TimeInterval in [-3600, 3600, 86400 * 30] {
             XCTAssertEqual(scanner.scan("tomorrow at 9", reference: now + offset, timeZone: Support.berlin, locale: Support.en), [],
                 "reference \(offset)s away from the system clock")
@@ -90,7 +79,7 @@ final class SystemDateScannerTests: XCTestCase {
     }
 
     func testProcessTimeZoneAndLocaleAreRestoredAfterAScan() throws {
-        let now = try nowAwayFromMidnight(in: Support.berlin)
+        let now = try Support.nowAwayFromMidnight(in: Support.berlin)
         let zoneBefore = NSTimeZone.default
         let localeBefore = Locale.current.identifier
         let languagesBefore = Locale.preferredLanguages
