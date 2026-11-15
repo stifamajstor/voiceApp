@@ -42,12 +42,15 @@ ROOT="$PWD"
 APP="$ROOT/build/$APP_NAME.app"
 
 echo "==> Building (release, arm64)"
-# Generate accessors without compiling; SwiftPM may regenerate them on any replan.
-swift build -c release --arch arm64 --print-manifest-job-graph >/dev/null
-BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
+# SwiftPM's executable accessor searches the app root, but signed macOS apps keep
+# resource bundles in Contents/Resources. Compile adjusted copies through an overlay.
 OVERLAY="$ROOT/.build/resource-accessors/overlay.json"
+BUILD_ARGS=(-c release --arch arm64 -Xswiftc -vfsoverlay -Xswiftc "$OVERLAY")
+# Planning does not read the overlay; use the same flags throughout to keep one cached plan.
+swift build "${BUILD_ARGS[@]}" --print-manifest-job-graph >/dev/null
+BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 swift "$ROOT/scripts/prepare-resource-overlay.swift" "$BIN_DIR" "$(dirname "$OVERLAY")"
-swift build -c release --arch arm64 -Xswiftc -vfsoverlay -Xswiftc "$OVERLAY"
+swift build "${BUILD_ARGS[@]}"
 
 shopt -s nullglob
 if [[ ! -x "$BIN_DIR/$APP_NAME" ]]; then
@@ -76,6 +79,8 @@ for bundle in "$BIN_DIR"/*.bundle; do
     echo "    resource bundle: $(basename "$bundle")"
     ditto "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
 done
+
+swift "$ROOT/scripts/verify-resource-overlay.swift" "$OVERLAY" "$APP"
 
 # Dynamic frameworks from binary dependencies (Sparkle) go in Contents/Frameworks.
 mkdir -p "$APP/Contents/Frameworks"
