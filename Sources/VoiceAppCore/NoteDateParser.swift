@@ -3,19 +3,40 @@ import Foundation
 /// Turns a dictated note into an optional reminder or calendar draft.
 ///
 /// Dates come from a `DateScanner` (by default `NSDataDetector`). The parser's job is to distrust it: a draft with
-/// a wrong date is worse than no draft, so anything unclear yields `draft == nil`. The rules:
+/// a wrong date is worse than no draft, so anything unclear yields `draft == nil`. Nothing here reads the current
+/// date, zone or locale: `reference`, `calendar` (Gregorian only, its time zone is the wall-clock zone) and
+/// `locale` are arguments. The default scanner can only resolve against the system clock, so with it `reference`
+/// must be "now" (see `SystemDateScanner`); tests inject a scripted scanner instead.
 ///
-/// - **Reminder or event.** A date makes a reminder. An event needs a clock time as well, plus either a time span
-///   in the phrase ("from 3pm to 4pm") or the note naming a meeting, appointment or "call with" someone. "Call mom
-///   tomorrow at 6pm" is a reminder. A phrase like "for an hour" is not read: the detector ignores it.
-/// - **Times.** A clock time is kept only if the matched phrase says it in digits: `9:30`, `9pm`, `19:00`, or a
-///   bare number after "at"/"from"/"to"/"until"/"till" (`at 9`) that equals the resolved hour. The detector moves
-///   a bare "at 7" to 19:00 and "at 3" to 15:00; those, and words such as "nine", "noon" or "tonight", leave a
-///   date without a time. An unreadable time that resolved to exactly midnight means the detector rolled the day
-///   over ("tomorrow at midnight"), so there is no draft. Times within an hour of a daylight-saving change in the
-///   calendar's zone are dropped, because the wall time may not exist or may occur twice.
+/// **Reminder or event.** A date makes a reminder. An event needs a clock time as well, plus either a time span in
+/// the phrase ("from 3pm to 4pm") or the note naming a meeting, appointment or "call with" someone. "Call mom
+/// tomorrow at 6pm" is a reminder. `end` is set only from a span; a meeting alone has none. "For an hour" is not
+/// read, because the detector ignores it.
+///
+/// **Times.** A clock time is kept only if the phrase states it in digits: `9:30`, `9pm`, `19:00`, or a bare number
+/// after "at", "from", "to", "until" or "till" that equals the resolved hour. The detector moves a bare "at 7" to
+/// 19:00 and "at 3" to 15:00; those, words such as "nine", "noon" or "tonight", an hour followed by "in the
+/// evening", and times within an hour of a daylight-saving change all leave a date without a time (`hour == nil`,
+/// not midnight). An unreadable time that resolved to exactly midnight means the detector rolled the day over
+/// ("tomorrow at midnight"), so there is no draft.
+///
+/// **No draft** when the note is blank or longer than `maximumNoteLength`; no date is found; a time is found with
+/// no day ("at 9am", "from 3pm to 4pm"); the phrase names its own time zone; the date is before today, or earlier
+/// today than `reference` when it has a time; the date is more than two years after `reference`; several different
+/// dates are found, since which one is meant is unclear (the same date twice is one date); a numeric date could be
+/// day-first or month-first ("3/4/2027"); the detector rolled an impossible date forward ("February 30"); a span
+/// has no digits ("two weeks from tomorrow"); or the phrase follows "every", "each", "not", "never", "except",
+/// "since" or the name of a day such as "Black Friday". A month and day without a year that has already passed is
+/// not moved to next year.
+///
+/// **Title.** The note without the date phrase and the preposition before it ("on", "at", "by", "for", "from",
+/// "until", "till", "before", "around", "due"), whitespace collapsed, a leading "remind me to/about/that/of" and
+/// surrounding punctuation removed, cut at a word to at most `maximumTitleLength` characters with a trailing "…".
+/// If nothing is left, the note itself, cut the same way.
 public struct NoteDateParser: Sendable {
+    /// Titles are cut to this many characters.
     public static let maximumTitleLength = 100
+    /// Longer notes are not scanned: the detector's time grows steeply with digit-heavy text (about 16 s for 100,000 characters).
     public static let maximumNoteLength = 4_000
     private static let horizonInYears = 2
 
@@ -25,6 +46,7 @@ public struct NoteDateParser: Sendable {
         self.scanner = scanner
     }
 
+    /// `reference` is the moment the note was dictated; see the type documentation for what it must be.
     public func parse(_ text: String, reference: Date, calendar: Calendar, locale: Locale) -> ParsedNote {
         ParsedNote(text: text, draft: draft(for: text, reference: reference, calendar: calendar, locale: locale))
     }
@@ -43,8 +65,14 @@ public struct NoteDateParser: Sendable {
         let matchedText = String(text[hit.range])
         let reading = ClockReading(matchedText)
 
+        if Self.recurrenceOrNegation.firstMatch(in: String(text[..<hit.range.lowerBound])) != nil { return nil }
+
         let wall = calendar.dateComponents(Self.wallUnits, from: hit.date)
-        let isTimed = reading.explains(wall) && !Self.isNearOffsetChange(hit.date, in: calendar.timeZone)
+        let isTimed = reading.explains(wall)
+            && !Self.isNearOffsetChange(hit.date, in: calendar.timeZone)
+            && Self.partOfDayAfter.firstMatch(in: String(text[hit.range.upperBound...])) == nil
+        // A span with no digits in the phrase is the detector misreading an offset: "two weeks from tomorrow".
+        if hit.duration > 0 && !isTimed && !matchedText.contains(where: \.isNumber) { return nil }
         if !isTimed && wall.hour == 0 && wall.minute == 0 && wall.second == 0 { return nil }
         if Self.rolledOver(wall, phrase: matchedText, calendar: calendar) { return nil }
 
@@ -119,6 +147,12 @@ public struct NoteDateParser: Sendable {
     private static func isNearOffsetChange(_ date: Date, in zone: TimeZone) -> Bool {
         zone.secondsFromGMT(for: date - 3600) != zone.secondsFromGMT(for: date + 3600)
     }
+
+    /// "every Monday", "not tomorrow", "Black Friday": the date is real but the note is not asking for a one-off on it.
+    private static let recurrenceOrNegation = Pattern(
+        #"\b(?:every|each|not|never|except|since)\s+(?:on\s+)?$|\b(?:black|cyber|good|holy|maundy|easter|ash|super|shrove|palm)\s+$"#)
+    /// "at 9 in the evening": the detector stops at "9" and reads 09:00.
+    private static let partOfDayAfter = Pattern(#"^\s*(?:(?:in|at|this)\s+(?:the\s+)?)?(?:morning|afternoon|evening|night|noon|midnight)\b"#)
 
     // MARK: Event keywords
 

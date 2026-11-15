@@ -228,9 +228,10 @@ final class NoteDateParserTests: XCTestCase {
             Case(name: "a span of more than a day is not trusted, even when its end reads like the start", now: Self.sunday, text: "Trip tomorrow at 9am",
                  hits: [hit("tomorrow at 9am", "2026-11-16 09:00", duration: 172_800)],
                  expected: .init(title: "Trip", start: "2026-11-16 09:00", matched: "tomorrow at 9am")),
-            Case(name: "a span without a clock time is ignored", now: Self.sunday, text: "A week from Friday",
-                 hits: [hit("from Friday", "2026-11-20 12:00", duration: 3600)],
-                 expected: .init(title: "A week", start: "2026-11-20", matched: "from Friday")),
+            Case(name: "a span with no clock time is a misread offset, not a date", now: Self.sunday, text: "A week from Friday",
+                 hits: [hit("from Friday", "2026-11-20 12:00", duration: 3600)], expected: nil),
+            Case(name: "two weeks from tomorrow", now: Self.sunday, text: "Call Anna two weeks from tomorrow",
+                 hits: [hit("from tomorrow", "2026-11-16 12:00", duration: 3600)], expected: nil),
             Case(name: "meeting with a time", now: Self.sunday, text: "Meeting with Anna tomorrow at 3pm",
                  hits: [hit("tomorrow at 3pm", "2026-11-16 15:00")],
                  expected: .init(kind: .event, title: "Meeting with Anna", start: "2026-11-16 15:00", matched: "tomorrow at 3pm")),
@@ -551,5 +552,39 @@ final class NoteDateParserTests: XCTestCase {
             XCTAssertEqual(parsed.draft?.start.hour, nil, "date-only in \(zone.identifier)")
             XCTAssertEqual(parsed.draft?.start, components(String(expected.prefix(10)), zone), zone.identifier)
         }
+    }
+
+    // MARK: Words around the phrase that change its meaning
+
+    func testNoDraftForRecurringNegatedOrNamedDates() {
+        run([
+            Case(name: "Black Friday", now: Self.sunday, text: "Black Friday sale", hits: [hit("Friday", "2026-11-20 12:00")], expected: nil),
+            Case(name: "Good Friday", now: Self.sunday, text: "Church on Good Friday", hits: [hit("Friday", "2026-11-20 12:00")], expected: nil),
+            Case(name: "Cyber Monday", now: Self.sunday, text: "Shop cyber monday", hits: [hit("monday", "2026-11-16 12:00")], expected: nil),
+            Case(name: "Easter Sunday", now: Self.sunday, text: "Lunch on Easter Sunday", hits: [hit("Sunday", "2026-11-22 12:00")], expected: nil),
+            Case(name: "Ash Wednesday", now: Self.sunday, text: "Ash Wednesday service", hits: [hit("Wednesday", "2026-11-18 12:00")], expected: nil),
+            Case(name: "every Monday", now: Self.sunday, text: "Gym every Monday", hits: [hit("Monday", "2026-11-16 12:00")], expected: nil),
+            Case(name: "each Friday at 9", now: Self.sunday, text: "Standup each Friday at 9", hits: [hit("Friday at 9", "2026-11-20 09:00")], expected: nil),
+            Case(name: "every other day with on", now: Self.sunday, text: "Gym every on Monday", hits: [hit("Monday", "2026-11-16 12:00")], expected: nil),
+            Case(name: "not tomorrow", now: Self.sunday, text: "Call Anna, not tomorrow", hits: [hit("tomorrow", "2026-11-16 12:00")], expected: nil),
+            Case(name: "never on Friday", now: Self.sunday, text: "Never on Friday", hits: [hit("Friday", "2026-11-20 12:00")], expected: nil),
+            Case(name: "except Friday", now: Self.sunday, text: "Open daily except Friday", hits: [hit("Friday", "2026-11-20 12:00")], expected: nil),
+            Case(name: "since Monday", now: Self.sunday, text: "Sick since Monday", hits: [hit("Monday", "2026-11-16 12:00")], expected: nil),
+            Case(name: "a word that only ends like the trigger", now: Self.sunday, text: "Cannot call tomorrow", hits: [hit("tomorrow", "2026-11-16 12:00")],
+                 expected: .init(title: "Cannot call", start: "2026-11-16", matched: "tomorrow")),
+        ])
+    }
+
+    func testClockTimeFollowedByAPartOfTheDayIsNotTrusted() {
+        run([
+            Case(name: "9 in the evening", now: Self.sunday, text: "Dinner tomorrow at 9 in the evening", hits: [hit("tomorrow at 9", "2026-11-16 09:00")],
+                 expected: .init(title: "Dinner in the evening", start: "2026-11-16", matched: "tomorrow at 9")),
+            Case(name: "9 at night", now: Self.sunday, text: "Dinner tomorrow at 9 at night", hits: [hit("tomorrow at 9", "2026-11-16 09:00")],
+                 expected: .init(title: "Dinner at night", start: "2026-11-16", matched: "tomorrow at 9")),
+            Case(name: "9:30 this afternoon", now: Self.sunday, text: "Call tomorrow at 9:30 this afternoon", hits: [hit("tomorrow at 9:30", "2026-11-16 09:30")],
+                 expected: .init(title: "Call this afternoon", start: "2026-11-16", matched: "tomorrow at 9:30")),
+            Case(name: "an unrelated word after the time", now: Self.sunday, text: "Call tomorrow at 9 nightly report", hits: [hit("tomorrow at 9", "2026-11-16 09:00")],
+                 expected: .init(title: "Call nightly report", start: "2026-11-16 09:00", matched: "tomorrow at 9")),
+        ])
     }
 }
