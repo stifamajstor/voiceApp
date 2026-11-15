@@ -29,7 +29,8 @@ let package = Package(
         ),
         .testTarget(
             name: "VoiceAppCoreTests",
-            dependencies: ["VoiceAppCore", .product(name: "GRDB", package: "GRDB.swift")]
+            dependencies: ["VoiceAppCore", .product(name: "GRDB", package: "GRDB.swift")],
+            resources: [.copy("Fixtures")]
         ),
     ]
 )
