@@ -18,28 +18,25 @@ Everything runs on-device. No accounts, no cloud.
   `VoiceAppCore` (`Sources/VoiceAppCore/`), and `VoiceAppCoreTests` (`swift test`).
 - `VoiceAppCore.MemoryStore` uses GRDB/SQLite with FTS5 under
   `~/Library/Application Support/VoiceApp/store/store.sqlite` (directory injectable for tests).
-  Immutable dictation/note/prompt records carry UUIDs and a database-persisted install ID.
-  The schema requires canonical uppercase, hyphenated record UUIDs and permits only a live-to-tombstone update;
-  tombstones cannot be updated, rows cannot be deleted, and inserts cannot replace existing IDs or rowids.
-  A future migration that backfills or purges records must drop and recreate these protective triggers.
-  Kinds are open string-backed values with named dictation/note/prompt constants; unknown kinds remain readable
-  and round-trip unchanged for future sync. Swift rejects negative or non-finite durations. Audio locations
-  are derived from the record UUID and an optional 1–10 character ASCII alphanumeric extension,
-  exposed by `audioURL(for:)`.
-  Deletion clears all payload fields and audio, keeping only an ID/device ID/deletion timestamp tombstone.
-  Audio symlinks are never followed; stored paths the store could not have produced and unexpected objects
-  do not block tombstoning, while a file removal failure leaves the record live for retry. Connections use
-  a five-second busy timeout and `PRAGMA secure_delete = ON`.
-  A database-local non-blocking file lock serializes migrations, with a five-second deadline and typed
-  `StoreError.migrationLockTimeout` error. Every open on SQLite 3.42+ enables FTS5 `secure-delete` after migrations,
-  so an OS upgrade enables scrubbing for existing databases too. Older SQLite rebuilds FTS inside each delete
-  transaction. Deleted text is removed from store files after close, excluding filesystem snapshots and backups.
-  FTS5 secure deletion can make the index unreadable by SQLite older than 3.42; a rebuild on a newer runtime
-  is required before downgrading.
-  Named migrations use descriptive feature-qualified names, registered in dependency order; do not number them.
-  Search quotes Unicode tokens across raw and final text, with only the last token treated as a prefix.
-  Listing and search order by creation time descending, then insertion order descending.
-  The store is not connected to dictation yet; menu history remains in memory.
+  Immutable records carry canonical uppercase, hyphenated record/device UUIDs and a persisted install ID.
+  Only live-to-tombstone updates are allowed; tombstones are terminal, rowids positive, and physical deletion
+  and replacement inserts forbidden. Backfill/purge migrations must drop and recreate the protective triggers.
+  Duplicate inserts fail with `SQLITE_CONSTRAINT_TRIGGER`; sync must not rely on a primary-key error code.
+  Kinds are text-backed values with dictation/note/prompt constants; unknown kinds round-trip for future sync.
+  Swift rejects negative or non-finite durations; SQLite requires numeric deletion timestamps.
+  Audio paths derive from the UUID and an optional 1–10 character ASCII alphanumeric extension via `audioURL(for:)`.
+  Deletion clears payload and audio, retaining only ID/device ID/deletion timestamp. Audio symlinks are never
+  followed; malformed paths and unexpected objects do not block tombstoning. File-removal failures preserve
+  live records for retry; audio removal and database commit cannot be atomic.
+  Connections use a five-second busy timeout and `PRAGMA secure_delete = ON`. A database-local non-blocking
+  migration lock has a five-second deadline and throws `StoreError.migrationLockTimeout` on contention.
+  Every delete transaction rebuilds FTS on every SQLite version; `delete(ids:)` tombstones a batch with one rebuild.
+  The growing cost (verifier: 96 ms at 10,000 records, 578 ms at 50,000 on SQLite 3.39.4) is accepted because
+  in-place FTS scrubbing leaves deleted terms or page-index prefixes behind. Deleted text is removed from
+  store files after close, excluding filesystem snapshots and backups.
+  Named migrations use descriptive feature-qualified names in dependency order, without numbering.
+  Search quotes Unicode tokens across raw/final text; only the last token is a prefix. Listing and search
+  order by creation time descending, then insertion order descending. Menu history still uses memory only.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
   Hugging Face repo `argmaxinc/whisperkit-coreml`, load, transcribe. Sources are in

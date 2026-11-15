@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 import GRDB
-import SQLite3
 import VoiceAppCore
 import XCTest
 
@@ -179,7 +178,7 @@ final class MemoryStoreTests: XCTestCase {
         XCTAssertEqual(try store.listRecent(), [])
         let record = try store.append(rawText: "valid", audioExtension: "Wav24")
         XCTAssertEqual(record.audioPath, "audio/\(record.id.uuidString).wav24")
-        XCTAssertNil(try store.audioURL(for: store.append(rawText: "no audio")))
+        XCTAssertNil(store.audioURL(for: try store.append(rawText: "no audio")))
     }
 
     func testFailedAudioDeletionKeepsRecordAvailableForRetry() throws {
@@ -430,28 +429,7 @@ final class MemoryStoreTests: XCTestCase {
         XCTAssertNotNil(try store.tombstone(id: record.id))
     }
 
-    func testReopenEnablesFTSSecureDeleteForExistingDatabase() throws {
-        guard sqlite3_libversion_number() >= 3_042_000 else {
-            throw XCTSkip("FTS5 secure-delete requires SQLite 3.42+")
-        }
-        let record = try store.append(rawText: "upgrade survivor")
-        try store.close()
-        store = nil
-        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
-        try database.write { db in
-            try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS, rank) VALUES('secure-delete', 0)")
-        }
-        try database.close()
-        store = try MemoryStore(directory: directory)
-        XCTAssertEqual(try store.fetch(id: record.id), record)
-        let check = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
-        defer { try? check.close() }
-        XCTAssertEqual(try check.read { db in
-            try Int.fetchOne(db, sql: "SELECT v FROM recordsFTS_config WHERE k = 'secure-delete'")
-        }, 1)
-    }
-
-    func testDeleteScrubsShrunkenIndexAfterLongNote() throws {
+    func testSecureDeletePragmaScrubsLongNotePayload() throws {
         let words = ["saffronquartz", "velvetbadger", "cobaltmeadow"]
         let note = try store.append(kind: .note, rawText: (0..<300).map { words[$0 % words.count] }.joined(separator: " "))
         let dictations = try (0..<3).map { _ in try store.append(rawText: "surviving searchable text") }
@@ -492,7 +470,7 @@ final class MemoryStoreTests: XCTestCase {
             try db.execute(sql: "PRAGMA recursive_triggers = OFF")
             for record in [live, deleted] {
                 XCTAssertThrowsError(try record.insert(db)) { error in
-                    XCTAssertEqual((error as? DatabaseError)?.resultCode, .SQLITE_CONSTRAINT)
+                    XCTAssertEqual((error as? DatabaseError)?.extendedResultCode, .SQLITE_CONSTRAINT_TRIGGER)
                 }
                 XCTAssertThrowsError(try db.execute(sql: """
                     INSERT OR REPLACE INTO records (id, deviceID, kind, createdAt, rawText, finalText)
@@ -526,7 +504,7 @@ final class MemoryStoreTests: XCTestCase {
             let decoy = directory.appending(path: "audio/\(id.uuidString).wav")
             try FileManager.default.createDirectory(at: decoy.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("keep".utf8).write(to: decoy)
-            XCTAssertNil(try store.audioURL(for: XCTUnwrap(store.fetch(id: id))))
+            XCTAssertNil(store.audioURL(for: try XCTUnwrap(store.fetch(id: id))))
             XCTAssertNoThrow(try store.delete(id: id))
             XCTAssertNotNil(try store.tombstone(id: id))
             XCTAssertEqual(try Data(contentsOf: decoy), Data("keep".utf8))
@@ -582,6 +560,147 @@ final class MemoryStoreTests: XCTestCase {
         XCTAssertEqual(try store.listRecent(), [record])
     }
 
+    func testBatchDeletePreservesTombstonesAndSurvivors() throws {
+        let records = try (0..<1_005).map { _ in try store.append(rawText: "batch secret") }
+        let survivor = try store.append(rawText: "survivor")
+        try store.delete(ids: records.map(\.id) + [records[0].id, UUID()])
+        try store.delete(ids: [])
+        try reopen()
+        XCTAssertEqual(try store.listRecent(), [survivor])
+        XCTAssertEqual(try store.search("batch"), [])
+        for record in records {
+            let tombstone = try XCTUnwrap(store.tombstone(id: record.id))
+            XCTAssertEqual(tombstone.id, record.id)
+            XCTAssertEqual(tombstone.deviceID, record.deviceID)
+        }
+        let before = try store.tombstone(id: records[0].id)
+        try store.delete(ids: records.map(\.id))
+        XCTAssertEqual(try store.tombstone(id: records[0].id), before)
+    }
+
+    func testBatchDeleteRollsBackAllTombstonesOnFailure() throws {
+        let first = try store.append(rawText: "first original")
+        let second = try store.append(rawText: "second original")
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        try database.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER fail_second_delete BEFORE UPDATE ON records
+                WHEN OLD.id = '\(second.id.uuidString)'
+                BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END
+                """)
+        }
+        XCTAssertThrowsError(try store.delete(ids: [first.id, second.id]))
+        XCTAssertEqual(try store.fetch(id: first.id), first)
+        XCTAssertEqual(try store.fetch(id: second.id), second)
+        XCTAssertNil(try store.tombstone(id: first.id))
+        XCTAssertEqual(try store.search("original"), [second, first])
+    }
+
+    func testAudioURLCanBeUsedWithoutThrowing() throws {
+        let record = try store.append(rawText: "audio", audioExtension: "wav")
+        let location: (MemoryRecord) -> URL? = store.audioURL(for:)
+        XCTAssertEqual(location(record), directory.appending(path: "audio/\(record.id.uuidString).wav"))
+    }
+
+    func testDeleteRemovesDeadIndexKeysAndTermsAcrossLeafPages() throws {
+        let words = distinctiveWords(count: 5_760)
+        let records = try (0..<240).map { index in
+            try store.append(rawText: words[(index * 24)..<((index + 1) * 24)].joined(separator: " "))
+        }
+        let deleted = records.enumerated().filter { ($0.offset * 73 % 240) < 120 }
+        let deletedWords = deleted.flatMap { words[($0.offset * 24)..<(($0.offset + 1) * 24)] }
+        let liveWords = Set(words).subtracting(deletedWords)
+        for (_, record) in deleted { try store.delete(id: record.id) }
+        try store.close()
+        store = nil
+
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        try database.write { db in
+            try db.execute(sql: "CREATE VIRTUAL TABLE temp.liveTerms USING fts5vocab(main, recordsFTS, row)")
+            let terms = try Set(String.fetchAll(db, sql: "SELECT term FROM liveTerms"))
+            XCTAssertEqual(terms, liveWords)
+            let keys = try Data.fetchAll(db, sql: "SELECT term FROM recordsFTS_idx WHERE length(term) > 0")
+            XCTAssertGreaterThan(keys.count, 10, "Fixture must span many index leaf pages")
+            for key in keys {
+                // FTS5 prepends the index number ('0' for the main token index).
+                XCTAssertEqual(key.first, Character("0").asciiValue)
+                let prefix = String(decoding: key.dropFirst(), as: UTF8.self)
+                XCTAssertTrue(terms.contains { $0.hasPrefix(prefix) }, "Dead index key: \(prefix)")
+            }
+        }
+        try database.close()
+        // Wider byte windows avoid accidental overlaps in this corpus; the key check covers short prefixes.
+        try assertNoDeletedWords(in: Array(deletedWords), excluding: Array(liveWords), windowLength: 8)
+    }
+
+    func testSchemaRejectsBlobKindsAndNoncanonicalDeviceIDs() throws {
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        try database.write { db in
+            let invalid: [(any DatabaseValueConvertible, any DatabaseValueConvertible)] = [
+                (Data("note".utf8), store.deviceID.uuidString),
+                ("note", "not-a-uuid"), ("note", store.deviceID.uuidString.lowercased()),
+                ("note", Data(store.deviceID.uuidString.utf8)),
+                ("note", store.deviceID.uuidString + "\0suffix"),
+                ("note", "0123456789AB-CDEF-0123-456789ABCDEF-"),
+            ]
+            for (kind, deviceID) in invalid {
+                XCTAssertThrowsError(try db.execute(sql: """
+                    INSERT INTO records (id, deviceID, kind, createdAt, rawText, finalText)
+                    VALUES (?, ?, ?, 100, 'foreign', 'foreign')
+                    """, arguments: [UUID().uuidString, deviceID, kind])) { error in
+                    XCTAssertEqual((error as? DatabaseError)?.resultCode, .SQLITE_CONSTRAINT)
+                }
+            }
+        }
+        let record = try store.append(rawText: "healthy")
+        XCTAssertEqual(try store.listRecent(), [record])
+        XCTAssertEqual(try store.search("healthy"), [record])
+        XCTAssertNoThrow(try store.delete(id: record.id))
+    }
+
+    func testSchemaRejectsNonnumericDeletionDates() throws {
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        try database.write { db in
+            for date: any DatabaseValueConvertible in ["yesterday", Data([1, 2, 3])] {
+                XCTAssertThrowsError(try db.execute(sql: "INSERT INTO records (id, deviceID, deletedAt) VALUES (?, ?, ?)",
+                    arguments: [UUID().uuidString, store.deviceID.uuidString, date]))
+            }
+        }
+    }
+
+    func testMalformedTombstoneDateThrowsInsteadOfCrashing() throws {
+        let id = UUID()
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        try database.write { db in
+            // Simulate a corrupt or externally written database, bypassing the schema guard.
+            try db.execute(sql: "PRAGMA ignore_check_constraints = ON")
+            try db.execute(sql: "INSERT INTO records (id, deviceID, deletedAt) VALUES (?, ?, 'yesterday')",
+                arguments: [id.uuidString, store.deviceID.uuidString])
+        }
+        XCTAssertThrowsError(try store.tombstone(id: id)) { error in
+            XCTAssertTrue(error is RowDecodingError)
+        }
+    }
+
+    func testSchemaRejectsNonpositiveRowIDsWithoutBlockingAppends() throws {
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? database.close() }
+        try database.write { db in
+            for rowid in [-1, 0, -2] {
+                XCTAssertThrowsError(try db.execute(sql: """
+                    INSERT INTO records (rowid, id, deviceID, kind, createdAt, rawText, finalText)
+                    VALUES (?, ?, ?, 'note', 100, 'foreign', 'foreign')
+                    """, arguments: [rowid, UUID().uuidString, store.deviceID.uuidString]))
+            }
+        }
+        let record = try store.append(rawText: "healthy")
+        XCTAssertEqual(try store.listRecent(), [record])
+    }
+
     private func distinctiveWords(count: Int) -> [String] {
         var state: UInt64 = 0x12345678
         return (0..<count).map { _ in
@@ -592,19 +711,30 @@ final class MemoryStoreTests: XCTestCase {
         }
     }
 
-    private func assertNoDeletedWords(in words: [String], file: StaticString = #filePath, line: UInt = #line) throws {
-        // Every longer residue contains a six-byte window, including prefix-compressed suffixes.
-        let fragments = Set(words.flatMap { word -> [Data] in
-            let bytes = Array(word.utf8)
-            guard bytes.count >= 6 else { return [] }
-            return (0...(bytes.count - 6)).map { Data(bytes[$0..<($0 + 6)]) }
-        })
+    private func assertNoDeletedWords(in words: [String], excluding liveWords: [String] = [], windowLength: Int = 6, file: StaticString = #filePath, line: UInt = #line) throws {
+        // Sliding windows also catch prefix-compressed suffixes.
+        let mask = UInt64.max >> (64 - windowLength * 8)
+        func fragments(in words: [String]) -> Set<UInt64> {
+            Set(words.flatMap { word -> [UInt64] in
+                var window: UInt64 = 0
+                return word.utf8.enumerated().compactMap { index, byte in
+                    window = ((window << 8) | UInt64(byte)) & mask
+                    return index >= windowLength - 1 ? window : nil
+                }
+            })
+        }
+        let deletedFragments = fragments(in: words).subtracting(fragments(in: liveWords))
         let files = try XCTUnwrap(FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]))
         for case let url as URL in files {
             guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { continue }
             let data = try Data(contentsOf: url)
-            let retained = fragments.filter { data.range(of: $0) != nil }
-            XCTAssertTrue(retained.isEmpty, "Retained \(retained.count) deleted fragments in \(url.lastPathComponent): \(retained.prefix(5).map { String(decoding: $0, as: UTF8.self) })", file: file, line: line)
+            var window: UInt64 = 0
+            var retained: Set<UInt64> = []
+            for (index, byte) in data.enumerated() {
+                window = ((window << 8) | UInt64(byte)) & mask
+                if index >= windowLength - 1, deletedFragments.contains(window) { retained.insert(window) }
+            }
+            XCTAssertTrue(retained.isEmpty, "Retained \(retained.count) deleted byte fragments in \(url.lastPathComponent)", file: file, line: line)
         }
     }
 

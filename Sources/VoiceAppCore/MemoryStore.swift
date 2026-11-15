@@ -1,7 +1,6 @@
 import Darwin
 import Foundation
 import GRDB
-import SQLite3
 
 public final class MemoryStore: Sendable {
     public enum StoreError: Error, Equatable {
@@ -38,17 +37,9 @@ public final class MemoryStore: Sendable {
         }
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
-        configuration.prepareDatabase { db in
-            try db.execute(sql: "PRAGMA secure_delete = ON")
-        }
+        configuration.prepareDatabase { try $0.execute(sql: "PRAGMA secure_delete = ON") }
         database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path, configuration: configuration)
         try Self.migrator.migrate(database)
-        if sqlite3_libversion_number() >= 3_042_000 {
-            // Configure on every open so stores created before an OS upgrade also scrub FTS entries.
-            try database.write { db in
-                try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS, rank) VALUES('secure-delete', 1)")
-            }
-        }
         deviceID = try database.read { db in
             guard let id = try UUID.fetchOne(db, sql: "SELECT deviceID FROM storeMetadata WHERE singleton = 1")
             else { throw StoreError.missingDeviceID }
@@ -135,32 +126,37 @@ public final class MemoryStore: Sendable {
             guard let row = try Row.fetchOne(db,
                 sql: "SELECT id, deviceID, deletedAt FROM records WHERE id = ? AND deletedAt IS NOT NULL",
                 arguments: [id.uuidString]) else { return nil }
-            return RecordTombstone(id: row["id"], deviceID: row["deviceID"], deletedAt: row["deletedAt"])
+            return try RecordTombstone(id: row.decode(forColumn: "id"), deviceID: row.decode(forColumn: "deviceID"),
+                deletedAt: Date(timeIntervalSince1970: row.decode(Double.self, forColumn: "deletedAt")))
         }
     }
 
-    public func delete(id: UUID) throws {
+    public func delete(id: UUID) throws { try delete(ids: [id]) }
+
+    public func delete(ids: [UUID]) throws {
         try database.write { db in
-            guard let record = try MemoryRecord.fetchOne(db,
-                sql: "SELECT * FROM records WHERE id = ? AND deletedAt IS NULL",
-                arguments: [id.uuidString]) else { return }
-            if let audio = try audioURL(for: record) {
-                try removeAudio(at: audio)
+            var deleted = false
+            for id in ids {
+                guard let record = try MemoryRecord.fetchOne(db,
+                    sql: "SELECT * FROM records WHERE id = ? AND deletedAt IS NULL",
+                    arguments: [id.uuidString]) else { continue }
+                if let audio = audioURL(for: record) { try removeAudio(at: audio) }
+                try db.execute(sql: """
+                    UPDATE records SET kind = NULL, createdAt = NULL, rawText = NULL, finalText = NULL,
+                        appBundleID = NULL, appName = NULL, project = NULL, modelID = NULL,
+                        durationSeconds = NULL, audioPath = NULL, deletedAt = ?
+                    WHERE id = ?
+                    """, arguments: [Date.now.timeIntervalSince1970, id.uuidString])
+                deleted = true
             }
-            try db.execute(sql: """
-                UPDATE records SET kind = NULL, createdAt = NULL, rawText = NULL, finalText = NULL,
-                    appBundleID = NULL, appName = NULL, project = NULL, modelID = NULL,
-                    durationSeconds = NULL, audioPath = NULL, deletedAt = ?
-                WHERE id = ?
-                """, arguments: [Date.now.timeIntervalSince1970, id.uuidString])
-            if sqlite3_libversion_number() < 3_042_000 {
-                // Older FTS5 retains deleted tokens in live segments; only rebuilding reliably removes them.
+            if deleted {
+                // Rebuilding also removes page-index prefixes that FTS5 secure deletion leaves behind.
                 try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS) VALUES('rebuild')")
             }
         }
     }
 
-    public func audioURL(for record: MemoryRecord) throws -> URL? {
+    public func audioURL(for record: MemoryRecord) -> URL? {
         guard let path = record.audioPath,
               let ext = try? Self.validatedAudioExtension((path as NSString).pathExtension),
               path == "audio/\(record.id.uuidString).\(ext)" else { return nil }
@@ -202,21 +198,24 @@ public final class MemoryStore: Sendable {
     private static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("memoryStore.createRecords") { db in
+            let uuidChecks = ["id", "deviceID"].map { column in
+                """
+                CHECK (typeof(\(column)) = 'text' AND length(CAST(\(column) AS BLOB)) = 36
+                    AND length(replace(\(column), '-', '')) = 32
+                    AND substr(\(column), 9, 1) = '-' AND substr(\(column), 14, 1) = '-'
+                    AND substr(\(column), 19, 1) = '-' AND substr(\(column), 24, 1) = '-'
+                    AND \(column) NOT GLOB '*[^0-9A-F-]*')
+                """
+            }.joined(separator: ",\n")
             try db.execute(sql: """
                 CREATE TABLE storeMetadata (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     deviceID TEXT NOT NULL
                 );
                 CREATE TABLE records (
-                    id TEXT PRIMARY KEY NOT NULL CHECK (
-                        typeof(id) = 'text' AND length(CAST(id AS BLOB)) = 36
-                        AND length(replace(id, '-', '')) = 32
-                        AND substr(id, 9, 1) = '-' AND substr(id, 14, 1) = '-'
-                        AND substr(id, 19, 1) = '-' AND substr(id, 24, 1) = '-'
-                        AND id NOT GLOB '*[^0-9A-F-]*'
-                    ),
+                    id TEXT PRIMARY KEY NOT NULL,
                     deviceID TEXT NOT NULL,
-                    kind TEXT,
+                    kind TEXT CHECK (kind IS NULL OR typeof(kind) = 'text'),
                     createdAt REAL,
                     rawText TEXT,
                     finalText TEXT,
@@ -226,7 +225,8 @@ public final class MemoryStore: Sendable {
                     modelID TEXT,
                     durationSeconds REAL,
                     audioPath TEXT,
-                    deletedAt REAL,
+                    deletedAt REAL CHECK (deletedAt IS NULL OR typeof(deletedAt) IN ('real', 'integer')),
+                    \(uuidChecks),
                     CHECK (
                         (deletedAt IS NULL AND kind IS NOT NULL AND createdAt IS NOT NULL
                             AND rawText IS NOT NULL AND finalText IS NOT NULL)
@@ -236,6 +236,8 @@ public final class MemoryStore: Sendable {
                             AND durationSeconds IS NULL AND audioPath IS NULL)
                     )
                 );
+                CREATE TRIGGER records_positive_rowid AFTER INSERT ON records WHEN NEW.rowid < 1
+                BEGIN SELECT RAISE(ABORT, 'record rowids must be positive'); END;
                 CREATE TRIGGER records_no_replace BEFORE INSERT ON records
                 WHEN EXISTS (SELECT 1 FROM records WHERE id = NEW.id OR rowid = NEW.rowid)
                 BEGIN

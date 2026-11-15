@@ -165,13 +165,13 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 
 Bare Swift filenames in this table live under `Sources/VoiceApp/`. The build script adjusts generated SwiftPM resource accessors and copies dependency bundles into `Contents/Resources`, so the packaged app does not depend on the source checkout's `.build` directory.
 
-`MemoryStore` defaults to `~/Library/Application Support/VoiceApp/store/store.sqlite`; tests inject temporary directories. It stores immutable records with string-backed kinds (including dictation, note, and prompt), indexes raw/final text with FTS5, and preserves payload-free deletion tombstones. Unknown kinds round-trip unchanged. SQLite rejects noncanonical record UUIDs, replacement inserts, and physical row deletion.
+`MemoryStore` defaults to `~/Library/Application Support/VoiceApp/store/store.sqlite`; tests inject temporary directories. It stores immutable records with string-backed kinds (including dictation, note, and prompt), indexes raw/final text with FTS5, and preserves payload-free deletion tombstones. Unknown kinds round-trip unchanged. SQLite rejects noncanonical record/device UUIDs, non-text kinds, nonnumeric deletion timestamps, nonpositive rowids, replacement inserts, and physical row deletion.
 
 Callers can supply an optional 1–10 character ASCII alphanumeric audio extension; the store derives `audio/<record UUID>.<lowercase extension>`. Use `audioURL(for:)` to get the file location and create its parent directory before writing audio. Deletion removes the file or symlink itself without following symlinks, skips stored paths the store could not have produced, tolerates unexpected filesystem objects, and leaves the record live if its audio file cannot be removed.
 
 Search treats the last word as a prefix and breaks timestamp ties by insertion order. Connections wait up to five seconds for another writer; a database-local file lock serializes migrations and fails with `StoreError.migrationLockTimeout` after five seconds of contention.
 
-Connections enable `PRAGMA secure_delete = ON`. Every open on SQLite 3.42+ enables FTS5 `secure-delete` after migrations, including for databases created before an OS upgrade. Older SQLite rebuilds the FTS index inside each delete transaction; this is slower as history grows. Both paths remove deleted text from the store's files after close; they cannot erase filesystem snapshots or backups. [FTS5 secure deletion changes the index format](https://sqlite.org/fts5.html#the_secure_delete_configuration_option): after using it, opening that database with SQLite older than 3.42 requires an FTS rebuild on a newer runtime first.
+Connections enable `PRAGMA secure_delete = ON`. Every delete transaction rebuilds FTS to remove deleted terms and page-index prefixes on every SQLite version. Use `delete(ids:)` to tombstone a batch with one rebuild. Rebuilding costs more as history grows; it removes deleted text from store files after close, excluding filesystem snapshots and backups.
 
 The store is not wired into dictation yet, so the menu's last three transcripts remain in memory only.
 
