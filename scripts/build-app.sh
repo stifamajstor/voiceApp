@@ -42,32 +42,14 @@ ROOT="$PWD"
 APP="$ROOT/build/$APP_NAME.app"
 
 echo "==> Building (release, arm64)"
-swift build -c release --arch arm64
+# Generate accessors without compiling; SwiftPM may regenerate them on any replan.
+swift build -c release --arch arm64 --print-manifest-job-graph >/dev/null
 BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
+OVERLAY="$ROOT/.build/resource-accessors/overlay.json"
+swift "$ROOT/scripts/prepare-resource-overlay.swift" "$BIN_DIR" "$(dirname "$OVERLAY")"
+swift build -c release --arch arm64 -Xswiftc -vfsoverlay -Xswiftc "$OVERLAY"
 
-# SwiftPM's executable accessor searches the app root, but signed macOS apps keep
-# resource bundles in Contents/Resources. Adjust only generated build artifacts,
-# then let SwiftPM recompile them; dependency checkouts remain untouched.
 shopt -s nullglob
-ACCESSORS=("$BIN_DIR"/*.build/DerivedSources/resource_bundle_accessor.swift)
-for accessor in "${ACCESSORS[@]}"; do
-    if grep -q 'Bundle.main.bundleURL.appendingPathComponent' "$accessor"; then
-        sed -i '' 's/Bundle.main.bundleURL.appendingPathComponent/(Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent/g' "$accessor"
-    elif ! grep -q '(Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent' "$accessor"; then
-        echo "error: unrecognized SwiftPM resource accessor: $accessor" >&2
-        exit 1
-    fi
-done
-if [[ ${#ACCESSORS[@]} -gt 0 ]]; then
-    swift build -c release --arch arm64
-    for accessor in "${ACCESSORS[@]}"; do
-        if ! grep -q '(Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent' "$accessor"; then
-            echo "error: SwiftPM regenerated an unrelocatable resource accessor: $accessor" >&2
-            exit 1
-        fi
-    done
-fi
-
 if [[ ! -x "$BIN_DIR/$APP_NAME" ]]; then
     echo "error: built executable not found at $BIN_DIR/$APP_NAME" >&2
     exit 1
