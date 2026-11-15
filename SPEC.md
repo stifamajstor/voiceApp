@@ -31,8 +31,10 @@ Everything runs on-device. No accounts, no cloud.
   Connections use a five-second busy timeout and `PRAGMA secure_delete = ON`. A database-local non-blocking
   migration lock has a five-second deadline and throws `StoreError.migrationLockTimeout` on contention.
   Every delete transaction rebuilds FTS on every SQLite version; `delete(ids:)` tombstones a batch with one rebuild.
-  The growing cost (verifier: 96 ms at 10,000 records, 578 ms at 50,000 on SQLite 3.39.4) is accepted because
-  in-place FTS scrubbing leaves deleted terms or page-index prefixes behind. Deleted text is removed from
+  A delete rebuilds the index, so its cost grows linearly with the indexed words: with records of about 37 words,
+  a single delete takes about 0.2 s at 10,000 records and about 1.1 s at 50,000. Deletes must therefore run off
+  the main thread. `PRAGMA auto_vacuum = FULL` is set before the first migration, so free pages are truncated on
+  every commit and a crash during a delete cannot leave text behind. Deleted text is removed from
   store files after close, excluding filesystem snapshots and backups.
   Named migrations use descriptive feature-qualified names in dependency order, without numbering.
   Search quotes Unicode tokens across raw/final text; only the last token is a prefix. Listing and search
