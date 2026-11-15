@@ -51,6 +51,30 @@ Everything runs on-device. No accounts, no cloud.
 - Packaging: `scripts/build-app.sh` runs `swift build -c release`, assembles `build/VoiceApp.app`
   with `Resources/Info.plist`, ad-hoc codesigns it (`codesign --force --deep -s -`).
 
+## Dictionary
+
+`VoiceAppCore.MemoryStore` stores mutable dictionary terms in `dictionaryTerms` in the same SQLite file
+and connection as records, added by the named migration `dictionary.createTerms`. Each term has a UUID,
+canonical `text`, `aliases`, UTC `updatedAt`, the persistent install `deviceID`, and optional `deletedAt`.
+Edits advance the per-term clock; deletion clears text and aliases and retains a terminal tombstone for
+future last-writer-wins sync. Listing returns live terms in UUID order. Empty or whitespace-only text is
+rejected. Two live terms cannot share a canonical spelling or alias under Unicode case folding and
+whitespace normalization; conflicts identify the value and owning term. Blank aliases are ignored.
+
+`correctText(_:terms:)` is pure and matches canonical spellings and literal aliases case-insensitively,
+with any whitespace run between words. Unicode letters, marks, numbers and connector punctuation are
+word characters; apostrophes and hyphens joining word characters prevent a boundary, while surrounding
+quotes and punctuation allow one. Longer input matches win globally; ties use input position, term UUID,
+then canonical UTF-8 spelling. Exact canonical matches make no replacement entry.
+
+The pass repeats until unchanged, up to eight passes, with a final convergence check. Output growth is
+limited to 1,048,576 UTF-16 units beyond the input; a pass exceeding that budget is not applied.
+`converged == false` reports an unfinished correction at either limit; idempotence is guaranteed only
+when converged. Chained edits merge overlapping original ranges, retaining the original substring, final
+replacement and last applied term UUID. Ranges are UTF-16 offsets in the original input; adjacent chains
+stay separate unless a later edit joins them. Bytes outside those ranges are preserved exactly.
+This slice provides no UI, app integration, number formatting, acoustic boosting or sync.
+
 ## Model catalog (verified against `argmaxinc/whisperkit-coreml` on 2026-09-30)
 
 All variant folders below exist in the HF repo; sizes are the summed file sizes of each folder.

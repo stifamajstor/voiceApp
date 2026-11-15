@@ -1,0 +1,154 @@
+import Foundation
+import GRDB
+import VoiceAppCore
+import XCTest
+
+final class DictionaryStoreTests: XCTestCase {
+    private var directory: URL!
+    private var store: MemoryStore!
+
+    override func setUpWithError() throws {
+        directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        store = try MemoryStore(directory: directory)
+    }
+
+    override func tearDownWithError() throws {
+        try store?.close()
+        try FileManager.default.removeItem(at: directory)
+    }
+
+    func testAddEditDeleteAndReopenPreserveIdentityAndClocks() throws {
+        let before = Date.now
+        let term = try store.addTerm(text: "ChatGPT", aliases: ["chat GPT", "chat gpt"])
+        XCTAssertEqual(term.deviceID, store.deviceID)
+        XCTAssertGreaterThanOrEqual(term.updatedAt, before)
+        XCTAssertNil(term.deletedAt)
+        let edited = try store.updateTerm(id: term.id, text: "ChatGPT Pro", aliases: ["chat pro"])
+        XCTAssertEqual(edited.id, term.id)
+        XCTAssertEqual(edited.deviceID, term.deviceID)
+        XCTAssertGreaterThan(edited.updatedAt, term.updatedAt)
+        try reopen()
+        XCTAssertEqual(try store.listTerms(), [edited])
+        try store.deleteTerm(id: term.id)
+        let deleted = try XCTUnwrap(store.dictionaryTerm(id: term.id))
+        XCTAssertNotNil(deleted.deletedAt)
+        XCTAssertEqual(deleted.deletedAt, deleted.updatedAt)
+        XCTAssertGreaterThan(deleted.updatedAt, edited.updatedAt)
+        XCTAssertEqual(deleted.text, "")
+        XCTAssertEqual(deleted.aliases, [])
+        try store.deleteTerm(id: term.id)
+        try reopen()
+        XCTAssertEqual(try store.listTerms(), [])
+        XCTAssertEqual(try store.dictionaryTerm(id: term.id), deleted)
+        XCTAssertThrowsError(try store.updateTerm(id: term.id, text: "resurrect", aliases: []))
+        XCTAssertNoThrow(try store.deleteTerm(id: UUID()))
+        XCTAssertThrowsError(try store.updateTerm(id: UUID(), text: "missing", aliases: []))
+    }
+
+    func testEmptyTextRejectedAndHostileTextRoundTrips() throws {
+        for text in ["", " \n\t", "\u{a0}"] {
+            XCTAssertThrowsError(try store.addTerm(text: text)) { error in
+                XCTAssertEqual(error as? DictionaryError, .emptyText)
+            }
+        }
+        for text in ["C++", ".NET", "a|b", "(x)", #"\d"#, "!!!", " \u{301}", String(repeating: "ž", count: 50_000)] {
+            let term = try store.addTerm(text: text, aliases: ["", " \t"])
+            XCTAssertEqual(try store.dictionaryTerm(id: term.id), term)
+        }
+        _ = try store.addTerm(text: "a b")
+        XCTAssertNoThrow(try store.addTerm(text: "a \u{301}b"))
+        let term = try store.addTerm(text: "Valid")
+        XCTAssertThrowsError(try store.updateTerm(id: term.id, text: " ", aliases: []))
+        XCTAssertEqual(try store.dictionaryTerm(id: term.id), term)
+    }
+
+    func testConflictsCoverTextAliasesUnicodeAndWhitespaceAndRollBack() throws {
+        let first = try store.addTerm(text: "Straße", aliases: ["chat GPT", "ČĆŽŠĐ"])
+        for (text, aliases, value) in [
+            ("STRASSE", [String](), "STRASSE"), ("Other", ["straße"], "straße"),
+            ("CHAT\n  gpt", [], "CHAT\n  gpt"), ("Other", ["čćžšđ"], "čćžšđ"),
+        ] {
+            XCTAssertThrowsError(try store.addTerm(text: text, aliases: aliases)) { error in
+                XCTAssertEqual(error as? DictionaryError, .conflict(value: value, termID: first.id))
+            }
+        }
+        let second = try store.addTerm(text: "Second", aliases: ["other"])
+        XCTAssertThrowsError(try store.updateTerm(id: second.id, text: "Second", aliases: ["CHAT GPT"]))
+        XCTAssertEqual(try store.dictionaryTerm(id: second.id), second)
+        XCTAssertNoThrow(try store.updateTerm(id: first.id, text: "Straße", aliases: ["CHAT GPT", "chat gpt"]))
+        try store.deleteTerm(id: first.id)
+        XCTAssertNoThrow(try store.addTerm(text: "STRASSE", aliases: ["chat GPT"]))
+    }
+
+    func testListIncludesEveryLiveTermInStableOrder() throws {
+        let first = try store.addTerm(text: "First")
+        let deleted = try store.addTerm(text: "Deleted")
+        let last = try store.addTerm(text: "Last")
+        try store.deleteTerm(id: deleted.id)
+        let expected = [first, last].sorted { $0.id.uuidString < $1.id.uuidString }
+        XCTAssertEqual(try store.listTerms(), expected)
+        try reopen()
+        XCTAssertEqual(try store.listTerms(), expected)
+    }
+
+    func testConcurrentDuplicateAttemptsHaveExactlyOneWinner() async throws {
+        let store = try XCTUnwrap(store)
+        let winners = await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<20 {
+                group.addTask { (try? store.addTerm(text: "Shared")) != nil }
+            }
+            var count = 0
+            for await success in group { if success { count += 1 } }
+            return count
+        }
+        XCTAssertEqual(winners, 1)
+        XCTAssertEqual(try store.listTerms().count, 1)
+    }
+
+    func testDictionaryWritesDoNotChangeRecordStorageOrSearch() throws {
+        let record = try store.append(rawText: "record survivor")
+        let term = try store.addTerm(text: "Example")
+        _ = try store.updateTerm(id: term.id, text: "Edited", aliases: ["edit"])
+        try store.deleteTerm(id: term.id)
+        XCTAssertEqual(try store.fetch(id: record.id), record)
+        XCTAssertEqual(try store.search("survivor"), [record])
+        try store.delete(id: record.id)
+        XCTAssertNotNil(try store.tombstone(id: record.id))
+    }
+
+    func testMigrationUpgradesMainDatabaseOnceWithoutChangingRecords() throws {
+        try store.close()
+        // Generated with the unmodified store sources at main 29e9eda, including a live record and tombstone.
+        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "main-store", withExtension: "sqlite", subdirectory: "Fixtures"))
+        try FileManager.default.removeItem(at: directory.appending(path: "store.sqlite"))
+        try FileManager.default.copyItem(at: fixture, to: directory.appending(path: "store.sqlite"))
+        store = try MemoryStore(directory: directory)
+        let identity = store.deviceID
+        let record = try XCTUnwrap(store.listRecent().first)
+        XCTAssertEqual(record.rawText, "main migration survivor")
+        XCTAssertEqual(try store.search("survivor"), [record])
+        let term = try store.addTerm(text: "Migrated")
+        for _ in 0..<3 {
+            try reopen()
+            XCTAssertEqual(store.deviceID, identity)
+            XCTAssertEqual(try store.fetch(id: record.id), record)
+            XCTAssertEqual(try store.listTerms(), [term])
+        }
+        try store.close()
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        let migrations = try database.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT count(*) FROM records WHERE deletedAt IS NOT NULL"), 1)
+            return try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid")
+        }
+        try database.close()
+        XCTAssertEqual(migrations, ["memoryStore.createRecords", "memoryStore.indexRecordText", "dictionary.createTerms"])
+        store = try MemoryStore(directory: directory)
+        try store.delete(id: record.id)
+        XCTAssertNotNil(try store.tombstone(id: record.id))
+    }
+
+    private func reopen() throws {
+        try store.close()
+        store = try MemoryStore(directory: directory)
+    }
+}
