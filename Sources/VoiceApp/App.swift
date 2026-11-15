@@ -17,12 +17,12 @@ struct VoiceApp: App {
         let history = DictationHistory()
         let dictation = DictationController(modelManager: modelManager, history: history)
         _history = StateObject(wrappedValue: history)
-        _historyWindow = StateObject(wrappedValue: HistoryWindowController(history: history))
+        let historyWindow = HistoryWindowController(history: history)
+        _historyWindow = StateObject(wrappedValue: historyWindow)
         history.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        appDelegate.termination = HistoryTermination(history: history)
-        appDelegate.history = history
+        appDelegate.termination = HistoryTermination(history: history, showHistory: historyWindow.show)
         // Register hotkeys once the app has finished launching and the run loop is up.
         Task { @MainActor in dictation.start() }
     }
@@ -99,17 +99,12 @@ struct MenuBarIcon: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var termination: HistoryTermination?
-    var history: DictationHistory?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let mayQuit = termination?.requestTermination { [weak self] success in
+        // Call NSApp.terminate from an AppKit event, never a main-actor task or main-queue block:
+        // AppKit would wait there and prevent the queue-draining task from replying.
+        let mayQuit = termination?.requestTermination { success in
             sender.reply(toApplicationShouldTerminate: success)
-            if !success {
-                let alert = NSAlert()
-                alert.messageText = "Could not finish deleting dictation history"
-                alert.informativeText = self?.history?.deleteError ?? "Please retry the deletion before quitting."
-                alert.runModal()
-            }
         } ?? true
         return mayQuit ? .terminateNow : .terminateLater
     }

@@ -105,7 +105,7 @@ struct HistoryView: View {
         .foregroundStyle(Theme.textPrimary)
         .tint(Theme.neon)
         .preferredColorScheme(.dark)
-        .alert("Delete \(deleteCount) dictations?", isPresented: $showDeleteConfirmation) {
+        .alert(history.deleteConfirmationTitle, isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
                 history.cancelDeleteAll()
                 history.cancelDeleteSelected()
@@ -116,8 +116,8 @@ struct HistoryView: View {
             }
         } message: {
             Text(history.needsDeleteAllConfirmation
-                 ? "This permanently deletes \(deleteCount) dictations, including records outside the current search. This cannot be undone."
-                 : "This permanently deletes \(deleteCount) selected dictations. This cannot be undone.")
+                 ? "This permanently deletes \(deleteCount) \(deleteCount == 1 ? "dictation" : "dictations"), including records outside the current search. This cannot be undone."
+                 : "This permanently deletes \(deleteCount) selected \(deleteCount == 1 ? "dictation" : "dictations"). This cannot be undone.")
         }
     }
 

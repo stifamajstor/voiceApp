@@ -56,9 +56,11 @@ Everything runs on-device. No accounts, no cloud.
   including the Delete key, requires confirmation with a count; selected records use one batch delete.
   **Delete all…** removes saved or queued dictations before confirmation, irrespective of search or
   pagination. Later deliveries survive. Deletes join the save queue and run off the main thread with
-  busy/error states. Application termination waits for running deletes, including menu Quit, logout,
-  and updater relaunch; failure cancels quitting and displays the error. Force quit, crashes, and forced
-  shutdown cannot wait. Copy is supported; re-paste is outside this slice.
+  busy/error states. Application termination, including menu Quit, logout, and updater relaunch, waits
+  for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. A delete that
+  fails during the wait cancels quitting and brings History forward with the error. Dictation and paste
+  remain responsive during the wait and after cancellation. Force quit, crashes, and forced shutdown
+  cannot wait. Copy is supported; re-paste is outside this slice.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
   Hugging Face repo `argmaxinc/whisperkit-coreml`, load, transcribe. Sources are in

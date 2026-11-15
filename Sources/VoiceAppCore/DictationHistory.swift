@@ -35,6 +35,20 @@ public final class DictationHistory: ObservableObject {
     @Published private var pendingDictations: Set<UUID> = []
     private var selectedDeletionIDs: Set<UUID> = []
 
+    public var savingDisclosure: String {
+        if storeError != nil {
+            return "Dictation history is not being saved. Open Settings → Behavior for the reason."
+        }
+        return saveEnabled
+            ? "Dictations are saved on this Mac. Turn off in Settings → Behavior."
+            : "New dictations are not saved. Turn on in Settings → Behavior."
+    }
+
+    public var deleteConfirmationTitle: String {
+        let count = needsDeleteAllConfirmation ? deleteAllCount : selectedDeleteCount
+        return "Delete \(count) \(count == 1 ? "dictation" : "dictations")?"
+    }
+
     public var selectedDeleteCount: Int { selectedDeletionIDs.count }
     public var deleteAllCount: Int { storedCount + pendingDictations.count }
     @Published public var selection: Set<UUID> = []
@@ -52,6 +66,7 @@ public final class DictationHistory: ObservableObject {
     private let log: (String) -> Void
     private var openingTask: Task<Void, Never>?
     private(set) var pendingSave: Task<Void, Never>?
+    private var saveGeneration = 0
     public private(set) var pendingDeletion: Task<Void, Never>?
     private(set) var pendingSearch: Task<Void, Never>?
     private var sessionRecent: [Recent] = []
@@ -84,7 +99,7 @@ public final class DictationHistory: ObservableObject {
                 await refreshRecent()
             } catch {
                 isOpening = false
-                storeError = error.localizedDescription
+                storeError = "Could not open dictation history. Relaunch VoiceApp to try again."
                 log("Could not open dictation history: \(error.localizedDescription)")
             }
         }
@@ -107,10 +122,15 @@ public final class DictationHistory: ObservableObject {
 
     private func save(_ dictation: CompletedDictation) {
         pendingDictations.insert(dictation.id)
+        saveGeneration += 1
+        let generation = saveGeneration
         let previous = pendingSave
         let opening = start()
         pendingSave = Task {
-            defer { pendingDictations.remove(dictation.id) }
+            defer {
+                pendingDictations.remove(dictation.id)
+                if generation == saveGeneration { pendingSave = nil }
+            }
             await previous?.value
             await opening.value
             guard storeError == nil else { return }
@@ -122,7 +142,7 @@ public final class DictationHistory: ObservableObject {
                 await refreshRecent()
                 requestSearch(debounced: false)
             } catch {
-                saveError = error.localizedDescription
+                saveError = "Could not save this dictation. Check available disk space and try again, or relaunch VoiceApp."
                 log("Could not save dictation history: \(error.localizedDescription)")
             }
         }
@@ -198,7 +218,8 @@ public final class DictationHistory: ObservableObject {
                 results = []
                 hasMore = false
                 selection = []
-                searchError = error.localizedDescription
+                searchError = "Could not search dictation history. Try again, or relaunch VoiceApp if it keeps failing."
+                log("Could not search dictation history: \(error.localizedDescription)")
                 isSearching = false
             }
         }
@@ -245,12 +266,15 @@ public final class DictationHistory: ObservableObject {
         guard !isDeleting, !isOpening, storeError == nil else { return nil }
         isDeleting = true
         deleteError = nil
+        saveGeneration += 1
+        let generation = saveGeneration
         let previous = pendingSave
         let recentIDs = Set(sessionRecent.map(\.id))
         let deletion = Task {
             defer {
                 isDeleting = false
                 pendingDeletion = nil
+                if generation == saveGeneration { pendingSave = nil }
             }
             await previous?.value
             do {
@@ -265,7 +289,7 @@ public final class DictationHistory: ObservableObject {
                 await refreshRecent()
                 await refresh()
             } catch {
-                deleteError = error.localizedDescription
+                deleteError = "Could not delete dictation history. Try again, or relaunch VoiceApp if it keeps failing."
                 log("Could not delete dictation history: \(error.localizedDescription)")
             }
         }
