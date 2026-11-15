@@ -42,32 +42,17 @@ ROOT="$PWD"
 APP="$ROOT/build/$APP_NAME.app"
 
 echo "==> Building (release, arm64)"
-swift build -c release --arch arm64
-BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
-
 # SwiftPM's executable accessor searches the app root, but signed macOS apps keep
-# resource bundles in Contents/Resources. Adjust only generated build artifacts,
-# then let SwiftPM recompile them; dependency checkouts remain untouched.
-shopt -s nullglob
-ACCESSORS=("$BIN_DIR"/*.build/DerivedSources/resource_bundle_accessor.swift)
-for accessor in "${ACCESSORS[@]}"; do
-    if grep -q 'Bundle.main.bundleURL.appendingPathComponent' "$accessor"; then
-        sed -i '' 's/Bundle.main.bundleURL.appendingPathComponent/(Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent/g' "$accessor"
-    elif ! grep -q '(Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent' "$accessor"; then
-        echo "error: unrecognized SwiftPM resource accessor: $accessor" >&2
-        exit 1
-    fi
-done
-if [[ ${#ACCESSORS[@]} -gt 0 ]]; then
-    swift build -c release --arch arm64
-    for accessor in "${ACCESSORS[@]}"; do
-        if ! grep -q '(Bundle.main.resourceURL ?? Bundle.main.bundleURL).appendingPathComponent' "$accessor"; then
-            echo "error: SwiftPM regenerated an unrelocatable resource accessor: $accessor" >&2
-            exit 1
-        fi
-    done
-fi
+# resource bundles in Contents/Resources. Compile adjusted copies through an overlay.
+OVERLAY="$ROOT/.build/resource-accessors/overlay.json"
+BUILD_ARGS=(-c release --arch arm64 -Xswiftc -vfsoverlay -Xswiftc "$OVERLAY")
+# Planning does not read the overlay; use the same flags throughout to keep one cached plan.
+swift build "${BUILD_ARGS[@]}" --print-manifest-job-graph >/dev/null
+BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
+swift "$ROOT/scripts/prepare-resource-overlay.swift" "$BIN_DIR" "$(dirname "$OVERLAY")"
+swift build "${BUILD_ARGS[@]}"
 
+shopt -s nullglob
 if [[ ! -x "$BIN_DIR/$APP_NAME" ]]; then
     echo "error: built executable not found at $BIN_DIR/$APP_NAME" >&2
     exit 1
@@ -94,6 +79,8 @@ for bundle in "$BIN_DIR"/*.bundle; do
     echo "    resource bundle: $(basename "$bundle")"
     ditto "$bundle" "$APP/Contents/Resources/$(basename "$bundle")"
 done
+
+swift "$ROOT/scripts/verify-resource-overlay.swift" "$OVERLAY" "$APP"
 
 # Dynamic frameworks from binary dependencies (Sparkle) go in Contents/Frameworks.
 mkdir -p "$APP/Contents/Frameworks"
