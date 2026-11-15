@@ -50,7 +50,9 @@ func verify() throws {
     }
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-    process.arguments = ["dyld_info", "-disassemble", app.appendingPathComponent("Contents/MacOS/\(executable)").path]
+    let binary = app.appendingPathComponent("Contents/MacOS/\(executable)")
+    let binaryData = try Data(contentsOf: binary)
+    process.arguments = ["dyld_info", "-disassemble", binary.path]
     let pipe = Pipe()
     process.standardOutput = pipe
     try process.run()
@@ -69,6 +71,7 @@ func verify() throws {
     disassembly.enumerateLines { line, _ in
         if line.hasSuffix(":") {
             current = expectedSymbols.contains(line) ? line : nil
+            if let symbol = current { selectors[symbol] = [] }
         } else if let symbol = current {
             for selector in ["mainBundle", "resourceURL"] where line.contains("; selector \"\(selector)\"") {
                 selectors[symbol, default: []].insert(selector)
@@ -78,6 +81,12 @@ func verify() throws {
     for bundle in bundles {
         let module = modules[bundle]!
         let symbol = symbols[bundle]!
+        // Swift can eliminate unused accessors entirely, as with GRDB's privacy manifest.
+        // A live accessor from this template embeds the bundle name in its fallback path.
+        if selectors[symbol] == nil && binaryData.range(of: Data(bundle.utf8)) == nil {
+            print("Verified overlay for unused resource bundle: \(module) -> \(bundle) (no linked accessor)")
+            continue
+        }
         guard selectors[symbol] == Set(["mainBundle", "resourceURL"]) else {
             throw VerificationError("Linked Bundle.module initializer for \(module) does not use Bundle.main.resourceURL; refusing to package \(bundle)")
         }
