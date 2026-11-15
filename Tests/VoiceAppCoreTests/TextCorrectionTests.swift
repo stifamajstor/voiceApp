@@ -20,7 +20,7 @@ final class TextCorrectionTests: XCTestCase {
     func testWholeWordsUnicodeJoinersAndPunctuation() {
         let input = "Mac machine Macintosh äMac Macß čMac Macć žMac Macš đMac Macž _Mac Mac2 Mac's Mac’s Mac-based pre-Mac pre’Mac Mac‑based 'Mac' (Mac),Mac!"
         let result = correctText(input, terms: [term("Computer", ["Mac"])])
-        XCTAssertEqual(result.text, "Computer machine Macintosh äMac Macß čMac Macć žMac Macš đMac Macž _Mac Mac2 Mac's Mac’s Mac-based 'Computer' (Computer),Computer!")
+        XCTAssertEqual(result.text, "Computer machine Macintosh äMac Macß čMac Macć žMac Macš đMac Macž _Mac Mac2 Mac's Mac’s Mac-based pre-Mac pre’Mac Mac‑based 'Computer' (Computer),Computer!")
         XCTAssertEqual(correctText("ČĆŽŠĐ ÄÖÜ STRASSE", terms: [term("Croatian", ["čćžšđ"]), term("German", ["äöü"]), term("Street", ["straße"])]).text, "Croatian German Street")
     }
 
