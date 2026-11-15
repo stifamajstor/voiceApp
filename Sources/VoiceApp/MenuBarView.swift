@@ -10,6 +10,7 @@ struct MenuBarView: View {
     @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var updater: Updater
     @EnvironmentObject private var history: DictationHistory
+    @EnvironmentObject private var termination: HistoryTermination
     let openHistory: () -> Void
     @AppStorage(TextInserter.keepOnClipboardKey) private var keepOnClipboard = false
 
@@ -19,6 +20,11 @@ struct MenuBarView: View {
             modelSection
             recentSection
             shortcutsSection
+            if termination.isQuitPending {
+                Text("Finishing history work before quitting…")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
             footer
         }
         .padding(14)
@@ -193,7 +199,8 @@ struct MenuBarView: View {
             .disabled(!updater.canCheckForUpdates)
             .help("Check for updates (v\(updater.currentVersion))")
             Spacer()
-            Button("Quit VoiceApp") { NSApp.terminate(nil) }
+            Button("Quit VoiceApp") { termination.requestQuit { NSApp.terminate(nil) } }
+                .disabled(termination.isQuitPending)
                 .keyboardShortcut("q")
         }
         .buttonStyle(NeonButtonStyle())

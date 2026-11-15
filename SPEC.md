@@ -57,8 +57,10 @@ Everything runs on-device. No accounts, no cloud.
   **Delete all…** removes saved or queued dictations before confirmation, irrespective of search or
   pagination. Later deliveries survive. Deletes join the save queue and run off the main thread with
   busy/error states. Application termination, including menu Quit, logout, and updater relaunch, waits
-  for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. A delete that
-  fails during the wait cancels quitting and brings History forward with the error. Dictation and paste
+  for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While waiting,
+  the menu shows that it is finishing history work, disables Quit, and ignores a second menu Quit request.
+  A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
+  that fails during the wait cancels quitting and brings History forward with the error. Dictation and paste
   remain responsive during the wait and after cancellation. Force quit, crashes, and forced shutdown
   cannot wait. Copy is supported; re-paste is outside this slice.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).

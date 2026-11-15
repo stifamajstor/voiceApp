@@ -17,10 +17,10 @@ final class HistoryInterfaceTests: XCTestCase {
         history.saveEnabled = true
         await history.start().value
         XCTAssertEqual(history.savingDisclosure,
-                       "Dictation history is not being saved. Open Settings → Behavior for the reason.")
+                       "Dictation history is not being saved. Dictation still works. The cause is in the log.")
         history.saveEnabled = false
         XCTAssertEqual(history.savingDisclosure,
-                       "Dictation history is not being saved. Open Settings → Behavior for the reason.")
+                       "Dictation history is not being saved. Dictation still works. The cause is in the log.")
     }
 }
 

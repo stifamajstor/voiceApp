@@ -9,6 +9,7 @@ struct VoiceApp: App {
     @StateObject private var dictation: DictationController
     @StateObject private var history: DictationHistory
     @StateObject private var historyWindow: HistoryWindowController
+    @StateObject private var termination: HistoryTermination
     @StateObject private var updater = Updater()
 
     init() {
@@ -22,7 +23,9 @@ struct VoiceApp: App {
         history.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        appDelegate.termination = HistoryTermination(history: history, showHistory: historyWindow.show)
+        let termination = HistoryTermination(history: history, showHistory: historyWindow.show)
+        _termination = StateObject(wrappedValue: termination)
+        appDelegate.termination = termination
         // Register hotkeys once the app has finished launching and the run loop is up.
         Task { @MainActor in dictation.start() }
     }
@@ -34,6 +37,7 @@ struct VoiceApp: App {
                 .environmentObject(dictation)
                 .environmentObject(history)
                 .environmentObject(updater)
+                .environmentObject(termination)
         } label: {
             MenuBarIcon(dictation: dictation, modelManager: modelManager)
         }

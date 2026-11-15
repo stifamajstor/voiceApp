@@ -3,7 +3,6 @@ import VoiceAppCore
 
 struct HistoryView: View {
     @EnvironmentObject private var history: DictationHistory
-    @State private var showDeleteConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -68,10 +67,7 @@ struct HistoryView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
-            .onDeleteCommand {
-                history.requestDeleteSelected()
-                showDeleteConfirmation = history.needsDeleteSelectedConfirmation
-            }
+            .onDeleteCommand(perform: history.requestDeleteSelected)
 
             HStack {
                 Text("\(history.results.count) results\(history.hasMore ? " · More available" : "")")
@@ -82,15 +78,10 @@ struct HistoryView: View {
                         .disabled(history.isSearching || history.isDeleting)
                 }
                 Spacer()
-                Button("Delete selected (\(history.selection.count))", role: .destructive) {
-                    history.requestDeleteSelected()
-                    showDeleteConfirmation = history.needsDeleteSelectedConfirmation
-                }
+                Button("Delete selected (\(history.selection.count))", role: .destructive,
+                       action: history.requestDeleteSelected)
                 .disabled(history.selection.isEmpty || history.isSearching || history.isDeleting)
-                Button("Delete all…", role: .destructive) {
-                    history.requestDeleteAll()
-                    showDeleteConfirmation = history.needsDeleteAllConfirmation
-                }
+                Button("Delete all…", role: .destructive, action: history.requestDeleteAll)
                 .disabled(history.isOpening || history.isDeleting || history.storeError != nil)
             }
             .buttonStyle(NeonButtonStyle())
@@ -105,7 +96,7 @@ struct HistoryView: View {
         .foregroundStyle(Theme.textPrimary)
         .tint(Theme.neon)
         .preferredColorScheme(.dark)
-        .alert(history.deleteConfirmationTitle, isPresented: $showDeleteConfirmation) {
+        .alert(history.deleteConfirmationTitle, isPresented: $history.isDeleteConfirmationPresented) {
             Button("Cancel", role: .cancel) {
                 history.cancelDeleteAll()
                 history.cancelDeleteSelected()

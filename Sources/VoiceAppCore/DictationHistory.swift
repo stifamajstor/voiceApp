@@ -31,13 +31,15 @@ public final class DictationHistory: ObservableObject {
     @Published public private(set) var hasMore = false
     @Published public private(set) var needsDeleteAllConfirmation = false
     @Published public private(set) var needsDeleteSelectedConfirmation = false
+    // SwiftUI dismisses the alert binding independently of its confirmation action.
+    @Published public var isDeleteConfirmationPresented = false
     @Published private var storedCount = 0
     @Published private var pendingDictations: Set<UUID> = []
     private var selectedDeletionIDs: Set<UUID> = []
 
     public var savingDisclosure: String {
-        if storeError != nil {
-            return "Dictation history is not being saved. Open Settings → Behavior for the reason."
+        if storeError != nil || saveError != nil {
+            return "Dictation history is not being saved. Dictation still works. The cause is in the log."
         }
         return saveEnabled
             ? "Dictations are saved on this Mac. Turn off in Settings → Behavior."
@@ -68,6 +70,7 @@ public final class DictationHistory: ObservableObject {
     private(set) var pendingSave: Task<Void, Never>?
     private var saveGeneration = 0
     public private(set) var pendingDeletion: Task<Void, Never>?
+    private(set) var deleteFailures = 0
     private(set) var pendingSearch: Task<Void, Never>?
     private var sessionRecent: [Recent] = []
     private var storedRecent: [Recent] = []
@@ -99,7 +102,9 @@ public final class DictationHistory: ObservableObject {
                 await refreshRecent()
             } catch {
                 isOpening = false
-                storeError = "Could not open dictation history. Relaunch VoiceApp to try again."
+                storeError = error as? MemoryStore.StoreError == .migrationLockTimeout
+                    ? "Opening dictation history timed out. History is not being saved; dictation still works. The cause is in the log. Relaunch VoiceApp to try opening it again."
+                    : "Could not open dictation history. History is not being saved; dictation still works. The cause is in the log."
                 log("Could not open dictation history: \(error.localizedDescription)")
             }
         }
@@ -142,7 +147,7 @@ public final class DictationHistory: ObservableObject {
                 await refreshRecent()
                 requestSearch(debounced: false)
             } catch {
-                saveError = "Could not save this dictation. Check available disk space and try again, or relaunch VoiceApp."
+                saveError = "Could not save this dictation. History is not being saved; dictation still works. The cause is in the log."
                 log("Could not save dictation history: \(error.localizedDescription)")
             }
         }
@@ -218,7 +223,7 @@ public final class DictationHistory: ObservableObject {
                 results = []
                 hasMore = false
                 selection = []
-                searchError = "Could not search dictation history. Try again, or relaunch VoiceApp if it keeps failing."
+                searchError = "Could not search dictation history. Try again. The cause is in the log."
                 log("Could not search dictation history: \(error.localizedDescription)")
                 isSearching = false
             }
@@ -230,9 +235,11 @@ public final class DictationHistory: ObservableObject {
         cancelDeleteAll()
         selectedDeletionIDs = selection.intersection(results.map(\.id))
         needsDeleteSelectedConfirmation = !selectedDeletionIDs.isEmpty
+        isDeleteConfirmationPresented = needsDeleteSelectedConfirmation
     }
 
     public func cancelDeleteSelected() {
+        isDeleteConfirmationPresented = false
         needsDeleteSelectedConfirmation = false
         selectedDeletionIDs = []
     }
@@ -249,16 +256,18 @@ public final class DictationHistory: ObservableObject {
         guard !isDeleting, !isOpening, storeError == nil else { return }
         cancelDeleteSelected()
         needsDeleteAllConfirmation = true
+        isDeleteConfirmationPresented = true
     }
 
     public func cancelDeleteAll() {
+        isDeleteConfirmationPresented = false
         needsDeleteAllConfirmation = false
     }
 
     @discardableResult
     public func confirmDeleteAll() -> Task<Void, Never>? {
         guard needsDeleteAllConfirmation else { return nil }
-        needsDeleteAllConfirmation = false
+        cancelDeleteAll()
         return delete(ids: nil)
     }
 
@@ -289,7 +298,8 @@ public final class DictationHistory: ObservableObject {
                 await refreshRecent()
                 await refresh()
             } catch {
-                deleteError = "Could not delete dictation history. Try again, or relaunch VoiceApp if it keeps failing."
+                deleteFailures += 1
+                deleteError = "Could not delete dictation history. Try again. The cause is in the log."
                 log("Could not delete dictation history: \(error.localizedDescription)")
             }
         }

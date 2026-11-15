@@ -1,7 +1,9 @@
+import Combine
 import Foundation
 
 @MainActor
-public final class HistoryTermination {
+public final class HistoryTermination: ObservableObject {
+    @Published public private(set) var isQuitPending = false
     private let history: DictationHistory
     private let showHistory: () -> Void
     private let waitForDeadline: @Sendable (Duration) async throws -> Void
@@ -16,31 +18,40 @@ public final class HistoryTermination {
     }
 
     public func requestTermination(reply: @escaping (Bool) -> Void) -> Bool {
-        guard waiting == nil else { return false }
+        guard !isQuitPending else { return false }
         guard history.pendingSave != nil else { return true }
+        isQuitPending = true
+        let deleteFailures = history.deleteFailures
         waiting = Task {
             while let tail = history.pendingSave, !Task.isCancelled {
                 await tail.value
             }
             guard !Task.isCancelled else { return }
-            finish(reply: reply)
+            finish(deleteFailures: deleteFailures, reply: reply)
         }
         deadline = Task {
             do { try await waitForDeadline(.seconds(30)) }
             catch { return }
             guard !Task.isCancelled else { return }
-            finish(reply: reply)
+            finish(deleteFailures: deleteFailures, reply: reply)
         }
         return false
     }
 
-    private func finish(reply: (Bool) -> Void) {
+    public func requestQuit(terminate: () -> Void) {
+        // A second in-app terminate call bypasses AppKit's deferred-quit delegate.
+        guard !isQuitPending else { return }
+        terminate()
+    }
+
+    private func finish(deleteFailures: Int, reply: (Bool) -> Void) {
         guard waiting != nil else { return }
         waiting?.cancel()
         deadline?.cancel()
         waiting = nil
         deadline = nil
-        let mayQuit = history.deleteError == nil
+        let mayQuit = history.deleteFailures == deleteFailures
+        if !mayQuit { isQuitPending = false }
         reply(mayQuit)
         if !mayQuit { showHistory() }
     }

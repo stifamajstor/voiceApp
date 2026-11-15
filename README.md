@@ -120,7 +120,9 @@ Every deletion asks for confirmation with the number of dictations to remove and
 dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
 Search and deletion run in the background with a busy indicator; large deletes can take seconds.
 Quitting from the menu or through macOS application termination (including logout and updater relaunch)
-waits for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. A delete
+waits for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While
+waiting, the menu says it is finishing history work, disables Quit, and ignores a second menu Quit request.
+A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
 that fails during the wait cancels quitting and brings History forward with the error; dictation and
 paste keep working meanwhile. Force quit, a crash, or a forced system shutdown cannot wait.
 Copy a transcript and paste it into the intended app yourself.
@@ -130,7 +132,8 @@ hides the menu's current list for this launch; it does not delete stored history
 A dictation delivered while history is on is saved even if you turn it off while paste or storage is
 waiting. Turning history off stops saving dictations delivered from then on and stops loading saved
 records into the menu; existing records stay available in History. The menu explains the current saving
-setting and points to Settings → Behavior. An unavailable store is disclosed as not saving.
+setting and points to Settings → Behavior. An unavailable store or a failed latest save is disclosed as
+not saving; a successful save restores the saved disclosure.
 If the store cannot open or a save fails, Settings → Behavior shows recovery advice,
 and dictation and paste continue. Recent transcripts remain available in memory for this launch.
 

@@ -76,7 +76,7 @@ final class DictationHistoryTests: XCTestCase {
         var logs: [String] = []
         let history = DictationHistory(repository: repository, defaults: defaults, log: { logs.append($0) })
         await history.start().value
-        XCTAssertEqual(history.storeError, "Could not open dictation history. Relaunch VoiceApp to try again.")
+        XCTAssertEqual(history.storeError, "Could not open dictation history. History is not being saved; dictation still works. The cause is in the log.")
         XCTAssertTrue(logs.contains { $0.contains("SELECT * FROM records") })
         var pasted = false
         await history.deliver(sample()) { _ in pasted = true }
@@ -160,8 +160,34 @@ final class DictationHistoryTests: XCTestCase {
         await history.pendingSave?.value
         XCTAssertTrue(pasted)
         XCTAssertEqual(logs.count, 1)
-        XCTAssertEqual(history.saveError, "Could not save this dictation. Check available disk space and try again, or relaunch VoiceApp.")
+        XCTAssertEqual(history.saveError, "Could not save this dictation. History is not being saved; dictation still works. The cause is in the log.")
         XCTAssertTrue(logs[0].contains("SELECT * FROM records"))
+    }
+
+    func testMenuDisclosureTracksSaveFailureAndRecovery() async {
+        let repository = ControlledRepository()
+        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        await history.start().value
+        let savedDisclosure = history.savingDisclosure
+        await repository.failSave()
+        await history.deliver(sample("failed")) { _ in }
+        await history.pendingSave?.value
+        XCTAssertEqual(history.savingDisclosure,
+                       "Dictation history is not being saved. Dictation still works. The cause is in the log.")
+        await repository.failSave(false)
+        await history.deliver(sample("saved")) { _ in }
+        await history.pendingSave?.value
+        XCTAssertNil(history.saveError)
+        XCTAssertEqual(history.savingDisclosure, savedDisclosure)
+    }
+
+    func testOnlyOpenTimeoutOffersRelaunch() async {
+        let repository = ControlledRepository()
+        await repository.failOpen(MemoryStore.StoreError.migrationLockTimeout)
+        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        await history.start().value
+        XCTAssertEqual(history.storeError,
+                       "Opening dictation history timed out. History is not being saved; dictation still works. The cause is in the log. Relaunch VoiceApp to try opening it again.")
     }
 
     func testClipboardFallbackStillRetainsSuccessfulTranscription() async throws {
@@ -200,6 +226,36 @@ final class DictationHistoryTests: XCTestCase {
         await history.pendingSearch?.value
         await history.refreshRecent()
         XCTAssertEqual(try records().count, 7)
+    }
+
+    func testClearRecentNeverRequestsDeletionAfterQueueDrainsAndQuietInterval() async {
+        let repository = ControlledRepository()
+        let noDelete = expectation(description: "Clear recent never requests any repository delete")
+        noDelete.isInverted = true
+        await repository.observeDeletes { noDelete.fulfill() }
+        let history = DictationHistory(repository: repository, defaults: defaults)
+        await history.start().value
+        let saveGate = Suspension()
+        await repository.setSaveGate(saveGate)
+        await history.deliver(sample("queued")) { _ in }
+        await fulfillment(of: [saveGate.entered], timeout: 2)
+        history.clearRecent()
+        await saveGate.release()
+        await history.pendingSave?.value
+        await history.pendingDeletion?.value
+        await history.pendingSearch?.value
+        await history.refreshRecent()
+        XCTAssertTrue(history.recent.isEmpty)
+        await history.deliver(sample("new")) { _ in }
+        await history.pendingSave?.value
+        await history.pendingSearch?.value
+        XCTAssertEqual(history.recent.map(\.text), ["new"])
+        // Observe absence after draining, including untracked delayed background deletes.
+        await fulfillment(of: [noDelete], timeout: 1)
+        let deleteRequests = await repository.deleteRequests
+        XCTAssertTrue(deleteRequests.isEmpty)
+        let writes = await repository.writes
+        XCTAssertEqual(writes.map(\.finalText), ["queued", "new"])
     }
 
     func testSearchUsesStorePrefixAndNewestFirstIncludingTimestampTies() async throws {
@@ -301,7 +357,7 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertEqual(history.results, before)
         XCTAssertEqual(history.selection, selected)
         XCTAssertTrue(logs.contains { $0.contains("SELECT * FROM records") })
-        XCTAssertEqual(history.deleteError, "Could not delete dictation history. Try again, or relaunch VoiceApp if it keeps failing.")
+        XCTAssertEqual(history.deleteError, "Could not delete dictation history. Try again. The cause is in the log.")
         XCTAssertFalse(history.isDeleting)
         await repository.failDelete(false)
         history.requestDeleteSelected()
@@ -357,10 +413,10 @@ final class DictationHistoryTests: XCTestCase {
         history.query = "new search"
         await fulfillment(of: [gate.entered], timeout: 2)
         await history.deleteSelected()?.value
-        XCTAssertEqual(history.deleteError, "Could not delete dictation history. Try again, or relaunch VoiceApp if it keeps failing.")
+        XCTAssertEqual(history.deleteError, "Could not delete dictation history. Try again. The cause is in the log.")
         await gate.release()
         await history.pendingSearch?.value
-        XCTAssertEqual(history.deleteError, "Could not delete dictation history. Try again, or relaunch VoiceApp if it keeps failing.")
+        XCTAssertEqual(history.deleteError, "Could not delete dictation history. Try again. The cause is in the log.")
     }
 
     func testLockedStoreSaveDoesNotDelayPasteOrMainActor() async throws {
@@ -397,7 +453,7 @@ final class DictationHistoryTests: XCTestCase {
         await history.pendingSearch?.value
         XCTAssertFalse(history.isSearching)
         XCTAssertTrue(history.results.isEmpty)
-        XCTAssertEqual(history.searchError, "Could not search dictation history. Try again, or relaunch VoiceApp if it keeps failing.")
+        XCTAssertEqual(history.searchError, "Could not search dictation history. Try again. The cause is in the log.")
         XCTAssertTrue(logs.contains { $0.contains("SELECT * FROM records") })
     }
 
@@ -487,6 +543,70 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertTrue(termination.requestTermination { _ in XCTFail("Immediate quit needs no reply") })
     }
 
+    func testMenuQuitIgnoresSecondRequestAndWorksAfterCancellation() async {
+        let repository = ControlledRepository()
+        let deleteGate = Suspension()
+        await repository.setDeleteGate(deleteGate)
+        await repository.failDelete(true)
+        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        await history.start().value
+        history.requestDeleteAll()
+        let deletion = history.confirmDeleteAll()
+        await fulfillment(of: [deleteGate.entered], timeout: 2)
+        let termination = HistoryTermination(history: history)
+        var pendingStates: [Bool] = []
+        let observation = termination.$isQuitPending.sink { pendingStates.append($0) }
+        var terminateCalls = 0
+        var replies: [Bool] = []
+        let replied = expectation(description: "Delete failure cancels menu quit")
+        let terminate = {
+            terminateCalls += 1
+            _ = termination.requestTermination {
+                replies.append($0)
+                replied.fulfill()
+            }
+        }
+        termination.requestQuit(terminate: terminate)
+        XCTAssertTrue(termination.isQuitPending)
+        termination.requestQuit(terminate: terminate)
+        XCTAssertEqual(terminateCalls, 1)
+        await deleteGate.release()
+        await deletion?.value
+        await fulfillment(of: [replied], timeout: 2)
+        XCTAssertEqual(replies, [false])
+        XCTAssertFalse(termination.isQuitPending)
+        XCTAssertEqual(pendingStates, [false, true, false])
+        termination.requestQuit(terminate: terminate)
+        XCTAssertEqual(terminateCalls, 2)
+        XCTAssertEqual(replies, [false])
+        withExtendedLifetime(observation) {}
+    }
+
+    func testOldDeleteFailureDoesNotCancelLaterQuitWithSaveInFlight() async {
+        let repository = ControlledRepository()
+        await repository.failDelete(true)
+        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        await history.start().value
+        history.requestDeleteAll()
+        await history.confirmDeleteAll()?.value
+        XCTAssertNotNil(history.deleteError)
+        let saveGate = Suspension()
+        await repository.setSaveGate(saveGate)
+        await history.deliver(sample()) { _ in }
+        await fulfillment(of: [saveGate.entered], timeout: 2)
+        let termination = HistoryTermination(history: history, showHistory: { XCTFail("Old failure must not open History") })
+        var replies: [Bool] = []
+        let replied = expectation(description: "Quit despite old delete failure")
+        XCTAssertFalse(termination.requestTermination {
+            replies.append($0)
+            replied.fulfill()
+        })
+        await saveGate.release()
+        await history.pendingSave?.value
+        await fulfillment(of: [replied], timeout: 2)
+        XCTAssertEqual(replies, [true])
+    }
+
     func testTerminationWaitsForEntireSaveTailAndIgnoresCancelledDeadline() async throws {
         let repository = ControlledRepository()
         let history = DictationHistory(repository: repository, defaults: defaults)
@@ -544,7 +664,7 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertEqual(replies, [true])
         let writes = await repository.writes
         XCTAssertEqual(writes.map(\.finalText), ["first", "second", "third"])
-        XCTAssertTrue(termination.requestTermination { _ in XCTFail("Drained queue is immediate") })
+        XCTAssertFalse(termination.requestTermination { _ in XCTFail("Successful quit already replied") })
     }
 
     func testTerminationWaitsForSavesQueuedAfterDelete() async throws {
@@ -611,6 +731,9 @@ final class DictationHistoryTests: XCTestCase {
         let after = await repository.writes
         XCTAssertEqual(after.count, 1)
         XCTAssertEqual(replies, [true])
+        var terminateCalls = 0
+        termination.requestQuit { terminateCalls += 1 }
+        XCTAssertEqual(terminateCalls, 0)
     }
 
     func testTerminationDeadlineStillCancelsQuitAfterFailedDelete() async throws {
@@ -695,13 +818,18 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertTrue(batches.isEmpty)
         XCTAssertEqual(history.results.count, 2)
         history.requestDeleteSelected()
+        XCTAssertTrue(history.isDeleteConfirmationPresented)
         XCTAssertEqual(history.selectedDeleteCount, 1)
         XCTAssertEqual(history.deleteConfirmationTitle, "Delete 1 dictation?")
         history.cancelDeleteSelected()
+        XCTAssertFalse(history.needsDeleteSelectedConfirmation)
         await history.deleteSelected()?.value
         XCTAssertEqual(history.results.count, 2)
         history.requestDeleteSelected()
+        XCTAssertTrue(history.isDeleteConfirmationPresented)
         history.selection = []
+        // SwiftUI may dismiss the alert binding before invoking its destructive action.
+        history.isDeleteConfirmationPresented = false
         await history.deleteSelected()?.value
         XCTAssertEqual(history.results.count, 1)
     }
@@ -748,6 +876,8 @@ private actor ControlledRepository: HistoryRepository {
     var writes: [CompletedDictation] = []
     var queries: [String] = []
     var deletedBatches: [[UUID]] = []
+    var deleteRequests: [[UUID]?] = []
+    private var onDelete: @Sendable () -> Void = {}
     private var openFailure: Error?
     private var saveFails = false
     private var deleteFails = false
@@ -760,7 +890,7 @@ private actor ControlledRepository: HistoryRepository {
     private var entries = [record("one"), record("two")]
 
     func failOpen(_ error: Error) { openFailure = error }
-    func failSave() { saveFails = true }
+    func failSave(_ value: Bool = true) { saveFails = value }
     func failSearch() { searchFails = true }
     func failDelete(_ value: Bool) { deleteFails = value }
     func setOpenGate(_ gate: Suspension) { openGate = gate }
@@ -769,6 +899,7 @@ private actor ControlledRepository: HistoryRepository {
     func setSearchGate(_ gate: Suspension?) { searchGate = gate }
     func setDeleteGate(_ gate: Suspension) { deleteGate = gate }
     func resetQueries() { queries = [] }
+    func observeDeletes(_ observation: @escaping @Sendable () -> Void) { onDelete = observation }
 
     func open() async throws {
         await openGate?.enter()
@@ -795,6 +926,8 @@ private actor ControlledRepository: HistoryRepository {
     }
 
     func delete(ids: [UUID]) async throws {
+        deleteRequests.append(ids)
+        onDelete()
         events.append("delete")
         await deleteGate?.enter()
         if deleteFails { throw TestFailure() }
@@ -803,6 +936,8 @@ private actor ControlledRepository: HistoryRepository {
     }
 
     func deleteAll() async throws {
+        deleteRequests.append(nil)
+        onDelete()
         events.append("delete")
         await deleteGate?.enter()
         if deleteFails { throw TestFailure() }

@@ -82,11 +82,11 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
                 if let error = history.storeError {
-                    Label("History unavailable: \(error)", systemImage: "exclamationmark.triangle")
+                    Label(error, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(Theme.warning)
                 }
                 if let error = history.saveError {
-                    Label("Could not save history: \(error)", systemImage: "exclamationmark.triangle")
+                    Label(error, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(Theme.warning)
                 }
             } header: {
