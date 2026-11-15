@@ -138,10 +138,11 @@ Losing either means installed copies can no longer update and need one manual re
 
 ## Development
 
-VoiceApp is a Swift package with one executable target. Its main dependencies are [WhisperKit](https://github.com/argmaxinc/WhisperKit), [FluidAudio](https://github.com/FluidInference/FluidAudio), [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts), and [Sparkle](https://github.com/sparkle-project/Sparkle). `Package.resolved` records the resolved versions.
+VoiceApp is a Swift package with a `VoiceApp` executable and a `VoiceAppCore` logic library. Its main dependencies are [WhisperKit](https://github.com/argmaxinc/WhisperKit), [FluidAudio](https://github.com/FluidInference/FluidAudio), [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts), [Sparkle](https://github.com/sparkle-project/Sparkle), and [GRDB](https://github.com/groue/GRDB.swift). `Package.resolved` records the resolved versions.
 
 ```sh
 swift build                         # Compile for development
+swift test                          # Run VoiceAppCore behavior tests
 scripts/build-app.sh                 # Validate the packaged release app
 codesign --verify --deep --strict build/VoiceApp.app
 ```
@@ -151,6 +152,8 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | Path | Responsibility |
 |---|---|
 | `Sources/VoiceApp/App.swift` | App lifecycle and menu bar scene |
+| `Sources/VoiceAppCore/` | Thread-safe SQLite record store, named migrations, and full-text search |
+| `Tests/VoiceAppCoreTests/` | Store persistence, deletion, search, and concurrency tests |
 | `ModelCatalog.swift`, `ModelManager.swift`, `ParakeetEngine.swift` | Model catalog, downloads, loading, and transcription |
 | `DictationController.swift`, `AudioRecorder.swift` | Dictation state and microphone capture |
 | `HotkeyManager.swift`, `ModifierHotkey.swift` | Global shortcuts |
@@ -160,8 +163,18 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | `Resources/` | App metadata and icon |
 | `scripts/` | App bundle, DMG packaging, and releases |
 
-Swift filenames in this table live under `Sources/VoiceApp/`. The build script adjusts generated SwiftPM resource accessors and copies dependency bundles into `Contents/Resources`, so the packaged app does not depend on the source checkout's `.build` directory.
+Bare Swift filenames in this table live under `Sources/VoiceApp/`. The build script adjusts generated SwiftPM resource accessors and copies dependency bundles into `Contents/Resources`, so the packaged app does not depend on the source checkout's `.build` directory.
 
-There is no automated test target yet. Before shipping a change, check the packaged app's model download/load, both dictation modes, permissions, actual transcription, paste into another app, and clipboard restoration. Compilation and signature verification alone do not prove those flows.
+`MemoryStore` defaults to `~/Library/Application Support/VoiceApp/store/store.sqlite`; tests inject temporary directories. It stores immutable records with string-backed kinds (including dictation, note, and prompt), indexes raw/final text with FTS5, and preserves payload-free deletion tombstones. Unknown kinds round-trip unchanged. SQLite rejects noncanonical record/device UUIDs, non-text kinds, nonnumeric deletion timestamps, nonpositive rowids, replacement inserts, and physical row deletion.
+
+Callers can supply an optional 1–10 character ASCII alphanumeric audio extension; the store derives `audio/<record UUID>.<lowercase extension>`. Use `audioURL(for:)` to get the file location and create its parent directory before writing audio. Deletion removes the file or symlink itself without following symlinks, skips stored paths the store could not have produced, tolerates unexpected filesystem objects, and leaves the record live if its audio file cannot be removed; in a batch, the other records also stay live even if some of their audio is already removed, and a retry finishes the job.
+
+Search treats the last word as a prefix and breaks timestamp ties by insertion order. Connections wait up to five seconds for another writer; a database-local file lock serializes migrations and fails with `StoreError.migrationLockTimeout` after five seconds of contention.
+
+Connections enable `PRAGMA secure_delete = ON`. Every delete transaction rebuilds FTS to remove deleted terms and page-index prefixes on every SQLite version. Use `delete(ids:)` to tombstone a batch with one rebuild. Rebuilding costs more as history grows; it removes deleted text from store files after close, excluding filesystem snapshots and backups.
+
+The store is not wired into dictation yet, so the menu's last three transcripts remain in memory only.
+
+GitHub Actions runs `swift build` and `swift test` on pull requests and pushes to `main`, using macOS 26 and Xcode 26.2 (Swift 6.2). Before shipping a change, also check the packaged app's model download/load, both dictation modes, permissions, actual transcription, paste into another app, and clipboard restoration. Core tests and signature verification alone do not prove those flows.
 
 [SPEC.md](SPEC.md) contains the original design and implementation contracts. For current shortcuts, dependencies, and packaging behavior, follow this README and the source.

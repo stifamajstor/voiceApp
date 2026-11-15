@@ -14,7 +14,31 @@ Everything runs on-device. No accounts, no cloud.
 
 ## Stack
 
-- Swift Package (`Package.swift`), single executable target `VoiceApp`, `Sources/VoiceApp/`.
+- Swift Package (`Package.swift`): executable `VoiceApp` (`Sources/VoiceApp/`), plain logic library
+  `VoiceAppCore` (`Sources/VoiceAppCore/`), and `VoiceAppCoreTests` (`swift test`).
+- `VoiceAppCore.MemoryStore` uses GRDB/SQLite with FTS5 under
+  `~/Library/Application Support/VoiceApp/store/store.sqlite` (directory injectable for tests).
+  Immutable records carry canonical uppercase, hyphenated record/device UUIDs and a persisted install ID.
+  Only live-to-tombstone updates are allowed; tombstones are terminal, rowids positive, and physical deletion
+  and replacement inserts forbidden. Backfill/purge migrations must drop and recreate the protective triggers.
+  Duplicate inserts fail with `SQLITE_CONSTRAINT_TRIGGER`; sync must not rely on a primary-key error code.
+  Kinds are text-backed values with dictation/note/prompt constants; unknown kinds round-trip for future sync.
+  Swift rejects negative or non-finite durations; SQLite requires numeric deletion timestamps.
+  Audio paths derive from the UUID and an optional 1–10 character ASCII alphanumeric extension via `audioURL(for:)`.
+  Deletion clears payload and audio, retaining only ID/device ID/deletion timestamp. Audio symlinks are never
+  followed; malformed paths and unexpected objects do not block tombstoning. File-removal failures preserve
+  live records for retry; audio removal and database commit cannot be atomic.
+  Connections use a five-second busy timeout and `PRAGMA secure_delete = ON`. A database-local non-blocking
+  migration lock has a five-second deadline and throws `StoreError.migrationLockTimeout` on contention.
+  Every delete transaction rebuilds FTS on every SQLite version; `delete(ids:)` tombstones a batch with one rebuild.
+  A delete rebuilds the index, so its cost grows linearly with the indexed words: with records of about 37 words,
+  a single delete takes about 0.2 s at 10,000 records and about 1.1 s at 50,000. Deletes must therefore run off
+  the main thread. `PRAGMA auto_vacuum = FULL` is set before the first migration, so free pages are truncated on
+  every commit and a crash during a delete cannot leave text behind. Deleted text is removed from
+  store files after close, excluding filesystem snapshots and backups.
+  Named migrations use descriptive feature-qualified names in dependency order, without numbering.
+  Search quotes Unicode tokens across raw/final text; only the last token is a prefix. Listing and search
+  order by creation time descending, then insertion order descending. Menu history still uses memory only.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
   Hugging Face repo `argmaxinc/whisperkit-coreml`, load, transcribe. Sources are in
