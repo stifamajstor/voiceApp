@@ -1,16 +1,23 @@
 import AppKit
 import SwiftUI
+import VoiceAppCore
 
 @main
 struct VoiceApp: App {
     @StateObject private var modelManager: ModelManager
     @StateObject private var dictation: DictationController
+    @StateObject private var history: DictationHistory
+    @StateObject private var historyWindow: HistoryWindowController
     @StateObject private var updater = Updater()
 
     init() {
         ModifierKey.registerDefaults()
         let modelManager = ModelManager()
-        let dictation = DictationController(modelManager: modelManager)
+        let history = DictationHistory()
+        let dictation = DictationController(modelManager: modelManager, history: history)
+        _history = StateObject(wrappedValue: history)
+        _historyWindow = StateObject(wrappedValue: HistoryWindowController(history: history))
+        history.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
         // Register hotkeys once the app has finished launching and the run loop is up.
@@ -19,9 +26,10 @@ struct VoiceApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView()
+            MenuBarView(openHistory: historyWindow.show)
                 .environmentObject(modelManager)
                 .environmentObject(dictation)
+                .environmentObject(history)
                 .environmentObject(updater)
         } label: {
             MenuBarIcon(dictation: dictation, modelManager: modelManager)
@@ -30,6 +38,7 @@ struct VoiceApp: App {
 
         Settings {
             SettingsView()
+                .environmentObject(history)
                 .environmentObject(modelManager)
                 .environmentObject(updater)
         }

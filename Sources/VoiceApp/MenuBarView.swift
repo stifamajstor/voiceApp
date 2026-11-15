@@ -1,6 +1,7 @@
 import AppKit
 import KeyboardShortcuts
 import SwiftUI
+import VoiceAppCore
 
 /// Content of the menu bar popover: status, quick model picker, recent transcripts, shortcuts,
 /// Settings and Quit.
@@ -8,6 +9,8 @@ struct MenuBarView: View {
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var dictation: DictationController
     @EnvironmentObject private var updater: Updater
+    @EnvironmentObject private var history: DictationHistory
+    let openHistory: () -> Void
     @AppStorage(TextInserter.keepOnClipboardKey) private var keepOnClipboard = false
 
     var body: some View {
@@ -91,9 +94,9 @@ struct MenuBarView: View {
             HStack {
                 SectionTitle("Recent")
                 Spacer()
-                if let last = dictation.recentTranscripts.first {
+                if let last = history.recent.first {
                     Button {
-                        dictation.copyToClipboard(last)
+                        TextInserter.copy(last.text)
                     } label: {
                         Label("Copy last", systemImage: "doc.on.doc")
                     }
@@ -103,29 +106,33 @@ struct MenuBarView: View {
                 }
             }
 
-            if dictation.recentTranscripts.isEmpty {
-                Text("Your transcripts show up here, ready to copy again. They stay in memory on this Mac only.")
+            if history.recent.isEmpty {
+                Text("Your latest transcripts appear here, ready to copy again.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             } else {
                 VStack(spacing: 4) {
-                    ForEach(dictation.recentTranscripts) { transcript in
+                    ForEach(history.recent) { transcript in
                         TranscriptRow(transcript: transcript) {
-                            dictation.copyToClipboard(transcript)
+                            TextInserter.copy(transcript.text)
                         }
                     }
                 }
             }
 
+            Toggle("Keep on clipboard after paste", isOn: $keepOnClipboard)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+
             HStack {
-                Toggle("Keep on clipboard after paste", isOn: $keepOnClipboard)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                Button("History…", action: openHistory)
+                    .buttonStyle(NeonButtonStyle())
                 Spacer()
-                if !dictation.recentTranscripts.isEmpty {
-                    Button("Clear") { dictation.clearHistory() }
+                if !history.recent.isEmpty {
+                    Button("Clear recent") { history.clearRecent() }
+                        .help("Hide this recent list. Stored history is kept.")
                         .buttonStyle(.plain)
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
@@ -223,7 +230,7 @@ struct MenuBarView: View {
 
 /// One recent transcript; clicking anywhere on it copies the text.
 private struct TranscriptRow: View {
-    let transcript: DictationController.Transcript
+    let transcript: DictationHistory.Recent
     let onCopy: () -> Void
 
     @State private var hovering = false
