@@ -38,9 +38,11 @@ public final class MemoryStore: Sendable {
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
         configuration.prepareDatabase { db in
-            // Only takes effect while the file is empty, so it must run before the first migration. FULL truncates
-            // free pages on every commit; a hot-journal rollback after a crash would not scrub reused free pages.
-            try db.execute(sql: "PRAGMA auto_vacuum = FULL")
+            // Setting this on an existing file takes a write lock, even when the mode is unchanged.
+            // FULL must be set before migration so free pages are truncated on every commit.
+            if try Int.fetchOne(db, sql: "PRAGMA page_count") == 0 {
+                try db.execute(sql: "PRAGMA auto_vacuum = FULL")
+            }
             try db.execute(sql: "PRAGMA secure_delete = ON")
         }
         database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path, configuration: configuration)

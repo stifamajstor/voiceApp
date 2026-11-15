@@ -261,6 +261,11 @@ final class MemoryStoreTests: XCTestCase {
                     Result {
                         let instance = try MemoryStore(directory: fresh)
                         defer { try? instance.close() }
+                        var configuration = Configuration()
+                        configuration.busyMode = .timeout(5)
+                        let database = try DatabaseQueue(path: fresh.appending(path: "store.sqlite").path, configuration: configuration)
+                        defer { try? database.close() }
+                        XCTAssertEqual(try database.read { try Int.fetchOne($0, sql: "PRAGMA auto_vacuum") }, 1)
                         try instance.append(rawText: "first open")
                         return instance.deviceID
                     }
@@ -643,6 +648,33 @@ final class MemoryStoreTests: XCTestCase {
         let second = try MemoryStore(directory: directory)
         defer { try? second.close() }
         XCTAssertEqual(try autoVacuumMode(), 1)
+    }
+
+    func testOpenDoesNotWaitForAnotherConnectionsWriteLock() throws {
+        let record = try store.append(rawText: "still readable")
+        let writer = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        defer { try? writer.close() }
+        try writer.inDatabase { db in
+            try db.execute(sql: "BEGIN IMMEDIATE")
+            defer { try? db.execute(sql: "ROLLBACK") }
+            let start = ContinuousClock.now
+            let reader = try MemoryStore(directory: directory)
+            defer { try? reader.close() }
+            XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+            XCTAssertEqual(try reader.listRecent(), [record])
+        }
+    }
+
+    func testExistingReadOnlyDatabaseCanOpen() throws {
+        let record = try store.append(rawText: "read only")
+        try store.close()
+        store = nil
+        let path = directory.appending(path: "store.sqlite").path
+        XCTAssertEqual(chmod(path, 0o444), 0)
+        defer { chmod(path, 0o600) }
+        let reader = try MemoryStore(directory: directory)
+        defer { try? reader.close() }
+        XCTAssertEqual(try reader.listRecent(), [record])
     }
 
     func testDeletesLeaveNoFreePages() throws {
