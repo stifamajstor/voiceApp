@@ -71,10 +71,10 @@ final class DictationHistoryTests: XCTestCase {
 
     func testUnavailableStoreStillPastesAndExposesReason() async throws {
         let repository = ControlledRepository()
-        await repository.failOpen()
+        await repository.failOpen(MemoryStore.StoreError.migrationLockTimeout)
         let history = DictationHistory(repository: repository, defaults: defaults)
         await history.start().value
-        XCTAssertEqual(history.storeError, "Test failure")
+        XCTAssertTrue(history.storeError?.contains("another process") == true)
         var pasted = false
         await history.deliver(sample()) { _ in pasted = true }
         await history.pendingSave?.value
@@ -414,7 +414,7 @@ private actor ControlledRepository: HistoryRepository {
     var writes: [CompletedDictation] = []
     var queries: [String] = []
     var deletedBatches: [[UUID]] = []
-    private var openFails = false
+    private var openFailure: Error?
     private var saveFails = false
     private var deleteFails = false
     private var searchFails = false
@@ -424,7 +424,7 @@ private actor ControlledRepository: HistoryRepository {
     private var deleteGate: Suspension?
     private var entries = [record("one"), record("two")]
 
-    func failOpen() { openFails = true }
+    func failOpen(_ error: Error) { openFailure = error }
     func failSave() { saveFails = true }
     func failSearch() { searchFails = true }
     func failDelete(_ value: Bool) { deleteFails = value }
@@ -436,7 +436,7 @@ private actor ControlledRepository: HistoryRepository {
 
     func open() async throws {
         await openGate?.enter()
-        if openFails { throw TestFailure() }
+        if let openFailure { throw openFailure }
     }
 
     func append(_ dictation: CompletedDictation) async throws -> MemoryRecord {

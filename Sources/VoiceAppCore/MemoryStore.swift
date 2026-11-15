@@ -3,11 +3,24 @@ import Foundation
 import GRDB
 
 public final class MemoryStore: Sendable {
-    public enum StoreError: Error, Equatable {
+    public enum StoreError: LocalizedError, Equatable {
         case invalidAudioExtension
         case invalidDuration
         case missingDeviceID
         case migrationLockTimeout
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidAudioExtension:
+                return "The audio file extension is invalid."
+            case .invalidDuration:
+                return "The recording duration must be finite and nonnegative."
+            case .missingDeviceID:
+                return "The history store is missing its device identity."
+            case .migrationLockTimeout:
+                return "Timed out waiting for another process to open the history store. Relaunch VoiceApp to try again."
+            }
+        }
     }
 
     public static var defaultDirectory: URL {
