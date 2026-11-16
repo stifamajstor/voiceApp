@@ -2,18 +2,15 @@ import AppKit
 import Foundation
 import VoiceAppCore
 
-/// Orchestrates hotkey -> record -> transcribe -> paste.
+/// Orchestrates hotkey -> record -> transcribe -> cloud correct -> paste.
 ///
 /// State machine: idle -> recording -> transcribing -> idle, with `error(message)` as a transient
-/// state that clears itself after a few seconds. Hotkeys are ignored while transcribing.
+/// state that clears itself after a few seconds. Once local transcription completes, control returns
+/// to `.idle` immediately so a new recording can begin even while an earlier dictation's cloud
+/// correction and ordered paste are still in flight.
 @MainActor
 final class DictationController: ObservableObject {
-    enum State: Equatable {
-        case idle
-        case recording
-        case transcribing
-        case error(String)
-    }
+    typealias State = DictationSessionCoordinator.State
 
     @Published private(set) var state: State = .idle
 
@@ -28,12 +25,12 @@ final class DictationController: ObservableObject {
 
     private let modelManager: ModelManager
     private let delivery: DictationDelivery
+    let session = DictationSessionCoordinator()
     private let recorder = AudioRecorder()
     private let hotkeys = HotkeyManager()
     private let modifierHotkeys = ModifierHotkeyMonitor()
 
     private var started = false
-    private var activeTrigger: CaptureTrigger?
     private var isRequestingMicrophone = false
     private var errorClearTask: Task<Void, Never>?
     private var maxDurationTask: Task<Void, Never>?
@@ -69,7 +66,7 @@ final class DictationController: ObservableObject {
             onToggle: { [weak self] in self?.toggle() },
             onNoteDown: { [weak self] in self?.beginRecording(trigger: .notePushToTalk) },
             onNoteUp: { [weak self] in
-                guard let self, self.activeTrigger == .notePushToTalk else { return }
+                guard let self, self.session.activeTrigger == .notePushToTalk else { return }
                 self.finishRecording()
             },
             onNoteToggle: { [weak self] in self?.toggle(trigger: .noteToggle) }
@@ -84,32 +81,32 @@ final class DictationController: ObservableObject {
     // MARK: Hotkey handlers
 
     private func pushToTalkDown() {
-        // While a toggle session is running (or we're busy) the press is ignored; because no
-        // session is attributed to push-to-talk, its key-up will be ignored as well.
+        // While a toggle session is running (or local transcription is running) the press is ignored;
+        // because no session is attributed to push-to-talk, its key-up will be ignored as well.
         beginRecording(trigger: .pushToTalk)
     }
 
     private func pushToTalkUp() {
-        guard state == .recording, activeTrigger == .pushToTalk else { return }
+        guard session.state == .recording, session.activeTrigger == .pushToTalk else { return }
         finishRecording()
     }
 
     /// The push-to-talk modifier turned out to be part of a key combo: discard, don't transcribe.
     private func cancelPushToTalk() {
-        guard state == .recording, activeTrigger == .pushToTalk else { return }
+        guard session.state == .recording, session.activeTrigger == .pushToTalk else { return }
         maxDurationTask?.cancel()
         maxDurationTask = nil
-        activeTrigger = nil
         recorder.stop()
-        state = .idle
+        session.cancelRecording()
+        state = session.state
     }
 
     private func toggle(trigger: CaptureTrigger = .toggle) {
-        switch state {
+        switch session.state {
         case .recording:
             // Only the toggle shortcut may end a toggle session; while push-to-talk is held the
             // press is ignored (the user is already in a hold-to-talk gesture).
-            if activeTrigger == trigger { finishRecording() }
+            if session.activeTrigger == trigger { finishRecording() }
         default:
             beginRecording(trigger: trigger)
         }
@@ -118,11 +115,7 @@ final class DictationController: ObservableObject {
     // MARK: Recording
 
     private func beginRecording(trigger: CaptureTrigger) {
-        switch state {
-        case .idle, .error: break
-        case .recording, .transcribing: return
-        }
-        guard !isQuitting, !isRequestingMicrophone else { return }
+        guard !isQuitting, session.canBeginRecording(), !isRequestingMicrophone else { return }
 
         guard modelManager.isReady else {
             showError("No model ready — pick and download one in Settings")
@@ -146,11 +139,11 @@ final class DictationController: ObservableObject {
         }
 
         errorClearTask?.cancel()
-        activeTrigger = trigger
         let app = NSWorkspace.shared.frontmostApplication
         recordingAppBundleID = app?.bundleIdentifier
         recordingAppName = app?.localizedName
-        state = .recording
+        session.beginRecording(trigger: trigger)
+        state = session.state
         playSound("Tink")
 
         maxDurationTask?.cancel()
@@ -178,31 +171,32 @@ final class DictationController: ObservableObject {
     }
 
     private func finishRecording() {
-        guard state == .recording else { return }
+        guard session.state == .recording else { return }
         maxDurationTask?.cancel()
         maxDurationTask = nil
-        let destination = activeTrigger?.destination ?? .dictation
-        activeTrigger = nil
 
+        let destination = session.activeTrigger?.destination ?? .dictation
         let samples = recorder.stop()
         playSound("Pop")
 
         let duration = Double(samples.count) / AudioRecorder.targetSampleRate
         guard duration >= Self.minimumDuration else {
-            state = .idle // accidental tap
+            session.discardShortRecording() // accidental tap
+            state = session.state
             return
         }
 
-        state = .transcribing
+        _ = session.beginTranscribing()
+        state = session.state
         transcriptionTask = Task { [weak self] in
             defer { self?.transcriptionTask = nil }
-            await self?.transcribeAndInsert(samples, destination: destination)
+            await self?.transcribeAndEnqueueDelivery(samples, durationSeconds: duration, destination: destination)
         }
     }
 
-    // MARK: Transcription
+    // MARK: Transcription & Delivery
 
-    private func transcribeAndInsert(_ samples: [Float], destination: CaptureDestination) async {
+    private func transcribeAndEnqueueDelivery(_ samples: [Float], durationSeconds: Double, destination: CaptureDestination) async {
         let modelID = modelManager.selectedModelID
         let rawText: String
         do {
@@ -212,32 +206,46 @@ final class DictationController: ObservableObject {
             return
         }
 
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !DictationDelivery.isNonSpeechMarker(trimmed) else {
+            showError("No speech detected")
+            return
+        }
+
         let target = NSWorkspace.shared.frontmostApplication
+        let appBundleID = destination == .note ? recordingAppBundleID : target?.bundleIdentifier
+        let appName = destination == .note ? recordingAppName : target?.localizedName
         let keepOnClipboard = UserDefaults.standard.bool(forKey: TextInserter.keepOnClipboardKey)
-        do {
-            let delivered = try await delivery.deliver(
-                rawText: rawText,
-                appBundleID: destination == .note ? recordingAppBundleID : target?.bundleIdentifier,
-                appName: destination == .note ? recordingAppName : target?.localizedName,
-                modelID: modelID,
-                durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate,
-                destination: destination
-            ) { text in
-                guard !self.isQuitting else { return }
-                try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
+
+        // Local transcription is done: allow new shortcuts right away while cloud correction
+        // and ordered paste complete in the background.
+        session.finishTranscribing()
+        state = session.state
+
+        session.enqueueDelivery { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.delivery.deliver(
+                    rawText: rawText,
+                    appBundleID: appBundleID,
+                    appName: appName,
+                    modelID: modelID,
+                    durationSeconds: durationSeconds,
+                    destination: destination
+                ) { text in
+                    guard !self.isQuitting else { return }
+                    try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
+                }
+            } catch {
+                if case TextInserter.InsertError.accessibilityNotGranted = error,
+                   !self.promptedAccessibilityThisLaunch {
+                    self.promptedAccessibilityThisLaunch = true
+                    Permissions.promptAccessibility()
+                }
+                if case .idle = self.session.state {
+                    self.showError(error.localizedDescription)
+                }
             }
-            if delivered {
-                state = .idle
-            } else {
-                showError("No speech detected")
-            }
-        } catch {
-            if case TextInserter.InsertError.accessibilityNotGranted = error,
-               !promptedAccessibilityThisLaunch {
-                promptedAccessibilityThisLaunch = true
-                Permissions.promptAccessibility()
-            }
-            showError(error.localizedDescription)
         }
     }
 
@@ -245,11 +253,13 @@ final class DictationController: ObservableObject {
 
     private func showError(_ message: String) {
         errorClearTask?.cancel()
-        state = .error(message)
+        session.setError(message)
+        state = session.state
         errorClearTask = Task { [weak self] in
             try? await Task.sleep(for: Self.errorDisplayDuration)
-            guard !Task.isCancelled, let self, case .error = self.state else { return }
-            self.state = .idle
+            guard !Task.isCancelled, let self, case .error = self.session.state else { return }
+            self.session.clearErrorIfShowing()
+            self.state = self.session.state
         }
     }
 

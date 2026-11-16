@@ -119,7 +119,7 @@ final class DictionaryStoreTests: XCTestCase {
     func testMigrationUpgradesMainDatabaseOnceWithoutChangingRecords() throws {
         try store.close()
         // Generated with the unmodified store sources at main 29e9eda, including a live record and tombstone.
-        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "main-store", withExtension: "sqlite", subdirectory: "Fixtures"))
+        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "main-29e9eda-store", withExtension: "sqlite", subdirectory: "Fixtures"))
         try FileManager.default.removeItem(at: directory.appending(path: "store.sqlite"))
         try FileManager.default.copyItem(at: fixture, to: directory.appending(path: "store.sqlite"))
         store = try MemoryStore(directory: directory)

@@ -72,7 +72,7 @@ Both the key combinations and modifier keys are configurable in Settings. A key 
 
 Modifier push-to-talk has a short hold delay. Combining that modifier with another key cancels the recording so ordinary Option-character typing does not produce a transcript. If both modifier actions use the same key, push-to-talk takes precedence.
 
-Recordings shorter than **0.3 seconds** are discarded. Recording stops automatically after **5 minutes**. Additional shortcuts are ignored while transcription is running.
+Recordings shorter than **0.3 seconds** are discarded. Recording stops automatically after **5 minutes**. Additional shortcuts are ignored while local transcription is running; once local transcription finishes, a new recording can start while cloud correction finishes in the background (pastes remain FIFO-ordered).
 
 ## Models and languages
 
@@ -101,7 +101,7 @@ Use the trash button next to a downloaded model in Settings to remove it. Models
 
 Audio capture and speech inference run on your Mac. VoiceApp does not upload recordings for transcription. Network access is used for dependencies, model files, and tokenizer downloads; prepare the selected model and its first load before relying on offline use.
 
-Cloud post-correction is off by default. When you enable it and add an API key, VoiceApp sends the dictionary-corrected transcript, your dictionary term names, and the target app name over HTTPS to the provider you selected (unless the focused app is excluded). OpenAI requests set `store: false`; Anthropic does not retain prompts or outputs by default or train on API traffic. API keys live in your login Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, non-synchronizable) and are never stored in UserDefaults, the history database, or logs.
+Cloud post-correction is off by default. When you enable it and add an API key, VoiceApp sends the dictionary-corrected transcript, your dictionary term names, and the target app name over HTTPS to the provider you selected (unless the focused app is excluded). OpenAI requests set `store: false` (abuse-monitoring logs may still be kept for up to 30 days); Anthropic does not retain prompts or outputs by default or train on API traffic (flagged content may be retained). API keys live in your login Keychain (`kSecClassGenericPassword`, non-synchronizable — never synced to iCloud, though file-based login keychain items ignore accessibility classes and may transfer with Migration Assistant) and are never stored in UserDefaults, the history database, or logs.
 
 | Permission | Purpose |
 |---|---|
@@ -208,11 +208,11 @@ dictionary-corrected dictation once through your own **Anthropic** (`claude-haik
 Messages API with thinking disabled and low effort) or **OpenAI** (`gpt-6-luna` default,
 Responses API with `reasoning.effort: "none"` and `store: false`) model before pasting.
 
-- **Non-blocking deadline:** Requests use a 2-second wall-clock deadline (`CloudCorrectionConfig.requestDeadline`). If the network is offline, slow, or rate-limited, VoiceApp pastes the dictionary-corrected text on time and discards any late response.
+- **Non-blocking deadline & Keychain reads:** Reading the API key from Keychain (`interactionNotAllowed`) and the network request both run off the main actor under a single 2-second wall-clock deadline (`CloudCorrectionConfig.requestDeadline`). If Keychain access would require UI, the request fails, or the deadline expires, VoiceApp pastes the dictionary-corrected text on time and discards any late response. VoiceApp lets new recordings start as soon as local transcription finishes while earlier cloud corrections finish and paste in submission order.
 - **Circuit breaker:** After 3 consecutive request or validation failures, cloud correction pauses for 5 minutes and falls back to dictionary text without network calls.
-- **Structured edit contract:** Models return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically and rejects the whole response if any edit is empty, missing, matches more than once, overlaps another edit, or changes more than 40% of the transcript's words.
-- **Models and testing:** Settings populates the model picker from each provider's `GET /v1/models` endpoint (OpenAI is filtered to a short allowlist of fast `reasoning.effort: "none"` models) and includes a **Test** button that sends a short sample and displays latency or errors in plain words.
-- **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
+- **Structured edit contract:** Models receive system instructions explicitly separating untrusted JSON user-message data (`target_app`, `dictionary_terms`, `transcript`) and return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically on whole Unicode words and extended grapheme clusters, protects dictionary-replaced words, rejects control characters/newlines, leading/trailing whitespace changes, or new shell characters (`> < | & ; $ \` \`), rejects ambiguous or overlapping spans, bounds per-edit length/word expansion, and requires dictations to have at least 3 words while capping changed words at `floor(totalWords * 0.40)`.
+- **Models and testing:** Settings populates the model picker from each provider's `GET /v1/models` endpoint (OpenAI is filtered to a short allowlist of fast `reasoning.effort: "none"` models: `gpt-6-luna`, `gpt-6.1-terra`) and includes a **Test** button that sends a short sample and displays latency or errors in plain words.
+- **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. Voice notes (`RecordKind.note`) never run through this dictation pass. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
 
 ## Troubleshooting
 

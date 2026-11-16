@@ -38,7 +38,7 @@ struct VoiceApp: App {
         _notesWindow = StateObject(wrappedValue: notesWindow)
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        let termination = HistoryTermination(history: history,
+        let termination = HistoryTermination(history: history, session: dictation.session,
             pendingTranscription: { dictation.transcriptionTask },
             prepareToQuit: { dictation.isQuitting = true },
             quitCancelled: { dictation.isQuitting = false }, showHistory: {

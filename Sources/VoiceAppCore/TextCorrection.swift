@@ -5,6 +5,8 @@ public struct TextReplacement: Equatable, Sendable {
     /// UTF-16 range in the original input, suitable for NSString and NSAttributedString.
     public let range: NSRange
     public let replacement: String
+    /// UTF-16 range in the corrected output text (`TextCorrectionResult.text`).
+    public let outputRange: NSRange
     public let termID: UUID
 }
 
@@ -274,10 +276,17 @@ private func mergedReplacements(original: NSString, output: NSString, sources: [
             }
             cursor += 1
         }
-        let replacement = output.substring(with: NSRange(location: start, length: cursor - start))
+        let outputRange = NSRange(location: start, length: cursor - start)
+        let replacement = output.substring(with: outputRange)
         let before = original.substring(with: range)
         if !before.utf8.elementsEqual(replacement.utf8) {
-            replacements.append(TextReplacement(original: before, range: range, replacement: replacement, termID: termID))
+            replacements.append(TextReplacement(
+                original: before,
+                range: range,
+                replacement: replacement,
+                outputRange: outputRange,
+                termID: termID
+            ))
         }
     }
     return replacements

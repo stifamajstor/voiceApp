@@ -114,13 +114,15 @@ public enum CloudCorrectionConfig {
     public static let circuitBreakerFailureThreshold = 3
     public static let circuitBreakerCooldown: Duration = .seconds(300)
     public static let maxWordChangeRatio = 0.40
+    public static let minWordsForCloudCorrection = 3
+    public static let maxEditWordCount = 8
+    public static let maxEditWordCountDelta = 2
     public static let maxOutputTokens = 400
     public static let maxPromptDictionaryTerms = 200
     public static let anthropicAPIVersion = "2026-10-21"
     public static let openAIAllowlistedModelIDs = [
         "gpt-6-luna",
         "gpt-6.1-terra",
-        "gpt-6-sol",
     ]
 }
 
@@ -169,21 +171,36 @@ public enum CloudCorrectionError: Error, Equatable, LocalizedError, Sendable {
 
 public enum EditValidationError: Error, Equatable, LocalizedError, Sendable {
     case emptyOriginal
+    case invalidWhitespaceOrControlCharacters
+    case disallowedShellCharacters
     case originalNotFound(String)
     case ambiguousMatch(String)
+    case unalignedWordBoundary(String)
+    case protectedDictionarySpan(String)
     case overlappingEdits
+    case excessiveExpansion
     case excessiveChanges(changedWords: Int, totalWords: Int, maxAllowed: Int)
 
     public var errorDescription: String? {
         switch self {
         case .emptyOriginal:
             return "Edit original text was empty."
+        case .invalidWhitespaceOrControlCharacters:
+            return "Edits cannot add or remove newlines, tabs, control characters, or edge whitespace."
+        case .disallowedShellCharacters:
+            return "Edits cannot introduce shell-significant characters."
         case .originalNotFound:
             return "An edit did not match the transcript."
         case .ambiguousMatch:
             return "An edit matched multiple places in the transcript."
+        case .unalignedWordBoundary:
+            return "Edits must align to whole Unicode words."
+        case .protectedDictionarySpan:
+            return "Edits cannot modify words corrected by the dictionary."
         case .overlappingEdits:
             return "Edits overlapped."
+        case .excessiveExpansion:
+            return "Edits expanded the transcript beyond allowed bounds."
         case .excessiveChanges(let changedWords, let totalWords, let maxAllowed):
             return "Edits changed too many words (\(changedWords) of \(totalWords), max \(maxAllowed))."
         }

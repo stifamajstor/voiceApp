@@ -6,9 +6,28 @@ public protocol CloudCorrecting: AnyObject, Sendable {
     func correct(
         _ text: String,
         dictionaryTerms: [String],
+        protectedRanges: [Range<String.Index>],
         appBundleID: String?,
         appName: String?
     ) async -> CorrectionOutcome
+}
+
+public extension CloudCorrecting {
+    @MainActor
+    func correct(
+        _ text: String,
+        dictionaryTerms: [String],
+        appBundleID: String?,
+        appName: String?
+    ) async -> CorrectionOutcome {
+        await correct(
+            text,
+            dictionaryTerms: dictionaryTerms,
+            protectedRanges: [],
+            appBundleID: appBundleID,
+            appName: appName
+        )
+    }
 }
 
 public struct CorrectionCircuitBreaker: Sendable {
@@ -130,6 +149,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
     private let sleep: @Sendable (Duration) async throws -> Void
     private let log: @Sendable (String) -> Void
     private var circuitBreaker: CorrectionCircuitBreaker
+    private var keyWriteGeneration: [CloudProviderID: Int] = [:]
 
     public convenience init(
         secretStore: any SecretStore = KeychainSecretStore(),
@@ -191,8 +211,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             modelsByProvider[provider] = (storedModel?.isEmpty == false) ? storedModel! : provider.defaultModelID
             optionsByProvider[provider] = [provider.defaultModelOption]
-            let key = try? secretStore.read(account: provider.rawValue)
-            keysPresent[provider] = !(key?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            keysPresent[provider] = false
         }
         self.selectedModels = modelsByProvider
         self.availableModels = optionsByProvider
@@ -206,6 +225,34 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
 
     public func hasKey(for provider: CloudProviderID) -> Bool {
         hasKeyByProvider[provider] ?? false
+    }
+
+    public func refreshKeyPresence(for provider: CloudProviderID? = nil) async {
+        let targets = provider.map { [$0] } ?? CloudProviderID.allCases
+        for target in targets {
+            let generation = keyWriteGeneration[target, default: 0]
+            switch await readAPIKeyOffMainActor(for: target, within: deadline) {
+            case .found:
+                if keyWriteGeneration[target, default: 0] == generation {
+                    hasKeyByProvider[target] = true
+                    keyStoreError = nil
+                }
+            case .missing:
+                if keyWriteGeneration[target, default: 0] == generation {
+                    hasKeyByProvider[target] = false
+                }
+            case .failed(let message):
+                if keyWriteGeneration[target, default: 0] == generation {
+                    hasKeyByProvider[target] = false
+                    keyStoreError = message
+                }
+            case .timedOut:
+                if keyWriteGeneration[target, default: 0] == generation {
+                    hasKeyByProvider[target] = false
+                    keyStoreError = "Reading API key from Keychain timed out."
+                }
+            }
+        }
     }
 
     public func selectedModelID(for provider: CloudProviderID) -> String {
@@ -228,6 +275,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         let trimmed = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         keyStoreError = nil
         do {
+            keyWriteGeneration[target, default: 0] += 1
             if trimmed.isEmpty {
                 try secretStore.delete(account: target.rawValue)
                 hasKeyByProvider[target] = false
@@ -250,6 +298,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         let target = provider ?? selectedProvider
         keyStoreError = nil
         do {
+            keyWriteGeneration[target, default: 0] += 1
             try secretStore.delete(account: target.rawValue)
             hasKeyByProvider[target] = false
             availableModels[target] = [target.defaultModelOption]
@@ -295,9 +344,22 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         guard let impl = providers[target] else {
             return availableModels[target] ?? [target.defaultModelOption]
         }
-        guard let apiKey = readAPIKey(for: target) else {
+        let apiKey: String
+        switch await readAPIKeyOffMainActor(for: target, within: deadline) {
+        case .found(let key):
+            hasKeyByProvider[target] = true
+            apiKey = key
+        case .missing:
             hasKeyByProvider[target] = false
             return [target.defaultModelOption]
+        case .failed(let message):
+            hasKeyByProvider[target] = false
+            modelsError = message
+            return availableModels[target] ?? [target.defaultModelOption]
+        case .timedOut:
+            hasKeyByProvider[target] = false
+            modelsError = "Timed out reading API key from Keychain."
+            return availableModels[target] ?? [target.defaultModelOption]
         }
         isRefreshingModels = true
         defer { isRefreshingModels = false }
@@ -316,9 +378,22 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
     public func testConnection() async {
         let target = selectedProvider
         guard let impl = providers[target] else { return }
-        guard let apiKey = readAPIKey(for: target) else {
+        let apiKey: String
+        switch await readAPIKeyOffMainActor(for: target, within: deadline) {
+        case .found(let key):
+            hasKeyByProvider[target] = true
+            apiKey = key
+        case .missing:
             hasKeyByProvider[target] = false
             testState = .failed(CloudCorrectionError.missingAPIKey(target).localizedDescription)
+            return
+        case .failed(let message):
+            hasKeyByProvider[target] = false
+            testState = .failed(message)
+            return
+        case .timedOut:
+            hasKeyByProvider[target] = false
+            testState = .failed("Timed out reading API key from Keychain.")
             return
         }
 
@@ -354,6 +429,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
     public func correct(
         _ text: String,
         dictionaryTerms: [String],
+        protectedRanges: [Range<String.Index>],
         appBundleID: String?,
         appName: String?
     ) async -> CorrectionOutcome {
@@ -373,12 +449,6 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
                 reason: "App excluded"
             )
         }
-
-        guard let apiKey = readAPIKey(for: providerID) else {
-            hasKeyByProvider[providerID] = false
-            return CorrectionOutcome(outputText: text)
-        }
-        hasKeyByProvider[providerID] = true
 
         guard circuitBreaker.canAttempt() else {
             isCircuitOpen = true
@@ -408,28 +478,115 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
             dictionaryTerms: dictionaryTerms,
             appName: appName
         )
+        let store = self.secretStore
+        let stage = DeadlineStageTracker()
 
         do {
-            let edits = try await raceWithDeadline(deadline) {
-                try await impl.correct(promptContext, modelID: modelID, apiKey: apiKey)
+            let raced = try await raceWithDeadline(deadline) {
+                let apiKey: String?
+                do {
+                    apiKey = try await Self.readSecretOffMainActor(secretStore: store, account: providerID.rawValue)
+                } catch {
+                    try Task.checkCancellation()
+                    stage.markKeyReadCompleted()
+                    return RacedCorrectionResult.keyReadFailed(error)
+                }
+                try Task.checkCancellation()
+                stage.markKeyReadCompleted()
+                guard let apiKey else {
+                    return RacedCorrectionResult.missingKey
+                }
+                do {
+                    let edits = try await impl.correct(promptContext, modelID: modelID, apiKey: apiKey)
+                    return RacedCorrectionResult.edits(edits, apiKey: apiKey)
+                } catch {
+                    return RacedCorrectionResult.providerFailed(error, apiKey: apiKey)
+                }
             }
-            let updated = try CorrectionEditValidator.apply(edits, to: text)
-            circuitBreaker.recordSuccess()
-            isCircuitOpen = false
-            let changed = updated != text
-            return CorrectionOutcome(
-                inputText: text,
-                outputText: updated,
-                provider: providerID,
-                modelID: modelID,
-                status: changed ? .applied : .unchanged,
-                edits: edits
-            )
-        } catch let error as EditValidationError {
+
+            switch raced {
+            case .missingKey:
+                hasKeyByProvider[providerID] = false
+                return CorrectionOutcome(outputText: text)
+
+            case .keyReadFailed(let error):
+                hasKeyByProvider[providerID] = false
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                log("Skipped cloud correction for provider=\(providerID.rawValue): \(reason)")
+                return CorrectionOutcome(
+                    outputText: text,
+                    provider: providerID,
+                    modelID: modelID,
+                    status: .skipped,
+                    reason: reason
+                )
+
+            case .providerFailed(let error, let apiKey):
+                hasKeyByProvider[providerID] = true
+                circuitBreaker.recordFailure()
+                isCircuitOpen = circuitBreaker.isOpen
+                let rawReason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let reason = SecretRedaction.redact(rawReason, secret: apiKey)
+                log("Cloud correction failed for provider=\(providerID.rawValue) model=\(modelID): \(reason)")
+                return CorrectionOutcome(
+                    inputText: text,
+                    outputText: text,
+                    provider: providerID,
+                    modelID: modelID,
+                    status: .fallback,
+                    reason: reason
+                )
+
+            case .edits(let edits, _):
+                hasKeyByProvider[providerID] = true
+                do {
+                    let updated = try CorrectionEditValidator.apply(
+                        edits,
+                        to: text,
+                        protectedRanges: protectedRanges
+                    )
+                    circuitBreaker.recordSuccess()
+                    isCircuitOpen = false
+                    let changed = updated != text
+                    return CorrectionOutcome(
+                        inputText: text,
+                        outputText: updated,
+                        provider: providerID,
+                        modelID: modelID,
+                        status: changed ? .applied : .unchanged,
+                        edits: edits
+                    )
+                } catch let error as EditValidationError {
+                    circuitBreaker.recordFailure()
+                    isCircuitOpen = circuitBreaker.isOpen
+                    let reason = error.errorDescription ?? "Invalid edits rejected"
+                    log("Rejected model edits for provider=\(providerID.rawValue) model=\(modelID): \(reason)")
+                    return CorrectionOutcome(
+                        inputText: text,
+                        outputText: text,
+                        provider: providerID,
+                        modelID: modelID,
+                        status: .fallback,
+                        reason: reason
+                    )
+                }
+            }
+        } catch let error as CloudCorrectionError where error == .timedOut(deadline) {
+            if !stage.didCompleteKeyRead {
+                let reason = "Timed out reading API key from Keychain."
+                log("Skipped cloud correction for provider=\(providerID.rawValue): \(reason)")
+                return CorrectionOutcome(
+                    outputText: text,
+                    provider: providerID,
+                    modelID: modelID,
+                    status: .skipped,
+                    reason: reason
+                )
+            }
             circuitBreaker.recordFailure()
             isCircuitOpen = circuitBreaker.isOpen
-            let reason = error.errorDescription ?? "Invalid edits rejected"
-            log("Rejected model edits for provider=\(providerID.rawValue) model=\(modelID): \(reason)")
+            let reason = error.errorDescription ?? "Timed out."
+            log("Cloud correction failed for provider=\(providerID.rawValue) model=\(modelID): \(reason)")
             return CorrectionOutcome(
                 inputText: text,
                 outputText: text,
@@ -441,8 +598,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         } catch {
             circuitBreaker.recordFailure()
             isCircuitOpen = circuitBreaker.isOpen
-            let rawReason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            let reason = SecretRedaction.redact(rawReason, secret: apiKey)
+            let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             log("Cloud correction failed for provider=\(providerID.rawValue) model=\(modelID): \(reason)")
             return CorrectionOutcome(
                 inputText: text,
@@ -457,16 +613,43 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
 
     // MARK: - Helpers
 
-    private func readAPIKey(for provider: CloudProviderID) -> String? {
+    private enum KeyReadStatus {
+        case found(String)
+        case missing
+        case failed(String)
+        case timedOut
+    }
+
+    private func readAPIKeyOffMainActor(for provider: CloudProviderID, within limit: Duration) async -> KeyReadStatus {
+        let store = self.secretStore
         do {
-            guard let raw = try secretStore.read(account: provider.rawValue) else {
-                return nil
+            let key = try await raceWithDeadline(limit) {
+                try await Self.readSecretOffMainActor(secretStore: store, account: provider.rawValue)
             }
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
+            return key.map { .found($0) } ?? .missing
+        } catch let error as CloudCorrectionError where error == .timedOut(limit) {
+            return .timedOut
         } catch {
-            log("Could not read API key from Keychain for provider=\(provider.rawValue): \(error.localizedDescription)")
-            return nil
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            log("Could not read API key from Keychain for provider=\(provider.rawValue): \(message)")
+            return .failed(message)
+        }
+    }
+
+    private static func readSecretOffMainActor(
+        secretStore: any SecretStore,
+        account: String
+    ) async throws -> String? {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let raw = try secretStore.read(account: account)
+                    let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    continuation.resume(returning: (trimmed?.isEmpty == false) ? trimmed : nil)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 
@@ -474,13 +657,16 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         _ limit: Duration,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
         let sleepFn = self.sleep
         let box = DeadlineHandleBox<T>()
 
         let outcome = await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<DeadlineRaceOutcome<T>, Never>) in
                 let handle = DeadlineRaceHandle(continuation)
-                box.attach(handle)
+                guard box.attach(handle) else {
+                    return
+                }
                 let req = Task.detached(priority: .userInitiated) {
                     do {
                         let value = try await operation()
@@ -492,13 +678,12 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
                 let timer = Task.detached(priority: .userInitiated) {
                     do {
                         try await sleepFn(limit)
-                        if handle.resume(.timedOut) {
-                            req.cancel()
-                        }
+                        guard !Task.isCancelled else { return }
+                        _ = handle.resume(.timedOut)
                     } catch {
                     }
                 }
-                handle.setTasks(request: req, timer: timer)
+                handle.attachTasks(request: req, timer: timer)
             }
         } onCancel: {
             box.cancel()
@@ -527,6 +712,26 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
     }
 }
 
+private enum RacedCorrectionResult: @unchecked Sendable {
+    case missingKey
+    case keyReadFailed(any Error)
+    case providerFailed(any Error, apiKey: String)
+    case edits([CorrectionEdit], apiKey: String)
+}
+
+private final class DeadlineStageTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var keyReadCompleted = false
+
+    var didCompleteKeyRead: Bool {
+        lock.withLock { keyReadCompleted }
+    }
+
+    func markKeyReadCompleted() {
+        lock.withLock { keyReadCompleted = true }
+    }
+}
+
 private enum DeadlineRaceOutcome<Value: Sendable>: Sendable {
     case success(Value)
     case failure(any Error)
@@ -544,14 +749,28 @@ private final class DeadlineRaceHandle<Value: Sendable>: @unchecked Sendable {
         self.continuation = continuation
     }
 
-    func setTasks(request: Task<Void, Never>, timer: Task<Void, Never>) {
+    func attachTasks(request: Task<Void, Never>, timer: Task<Void, Never>) {
+        let cancelRequest: Bool
+        let cancelTimer: Bool
         lock.lock()
-        requestTask = request
-        timerTask = timer
-        let shouldCancel = cancelled
+        if cancelled {
+            cancelRequest = true
+            cancelTimer = true
+        } else if continuation == nil {
+            cancelRequest = false
+            cancelTimer = true
+        } else {
+            requestTask = request
+            timerTask = timer
+            cancelRequest = false
+            cancelTimer = false
+        }
         lock.unlock()
-        if shouldCancel {
+
+        if cancelRequest {
             request.cancel()
+        }
+        if cancelTimer {
             timer.cancel()
         }
     }
@@ -560,9 +779,16 @@ private final class DeadlineRaceHandle<Value: Sendable>: @unchecked Sendable {
         lock.lock()
         let cont = continuation
         continuation = nil
+        let req = requestTask
         let timer = timerTask
+        requestTask = nil
+        timerTask = nil
         lock.unlock()
+
         guard let cont else { return false }
+        if case .timedOut = outcome {
+            req?.cancel()
+        }
         timer?.cancel()
         cont.resume(returning: outcome)
         return true
@@ -575,7 +801,10 @@ private final class DeadlineRaceHandle<Value: Sendable>: @unchecked Sendable {
         continuation = nil
         let req = requestTask
         let timer = timerTask
+        requestTask = nil
+        timerTask = nil
         lock.unlock()
+
         req?.cancel()
         timer?.cancel()
         cont?.resume(returning: .failure(CancellationError()))
@@ -587,20 +816,23 @@ private final class DeadlineHandleBox<Value: Sendable>: @unchecked Sendable {
     private var handle: DeadlineRaceHandle<Value>?
     private var cancelled = false
 
-    func attach(_ handle: DeadlineRaceHandle<Value>) {
+    func attach(_ handle: DeadlineRaceHandle<Value>) -> Bool {
         lock.lock()
-        self.handle = handle
-        let shouldCancel = cancelled
-        lock.unlock()
-        if shouldCancel {
+        if cancelled {
+            lock.unlock()
             handle.cancel()
+            return false
         }
+        self.handle = handle
+        lock.unlock()
+        return true
     }
 
     func cancel() {
         lock.lock()
         cancelled = true
         let current = handle
+        handle = nil
         lock.unlock()
         current?.cancel()
     }

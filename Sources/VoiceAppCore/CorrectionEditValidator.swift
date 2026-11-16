@@ -1,13 +1,19 @@
 import Foundation
 
 public enum CorrectionEditValidator {
+    private static let shellSignificantScalars: Set<Unicode.Scalar> = Set(
+        [">", "<", "|", "&", ";", "$", "`", "\\"].compactMap { Unicode.Scalar($0) }
+    )
+
     public static func apply(
         _ edits: [CorrectionEdit],
         to text: String,
+        protectedRanges: [Range<String.Index>] = [],
         maxWordChangeRatio: Double = CloudCorrectionConfig.maxWordChangeRatio
     ) throws -> String {
         guard !edits.isEmpty else { return text }
 
+        let textWordRanges = wordTokenRanges(in: text)
         var matched: [(range: Range<String.Index>, edit: CorrectionEdit)] = []
         matched.reserveCapacity(edits.count)
 
@@ -15,13 +21,56 @@ public enum CorrectionEditValidator {
             guard !edit.original.isEmpty else {
                 throw EditValidationError.emptyOriginal
             }
-            let occurrences = findOccurrences(of: edit.original, in: text)
+            guard edit.original.first?.isWhitespace != true,
+                  edit.original.last?.isWhitespace != true,
+                  edit.replacement.first?.isWhitespace != true,
+                  edit.replacement.last?.isWhitespace != true else {
+                throw EditValidationError.invalidWhitespaceOrControlCharacters
+            }
+            guard controlOrNewlineScalars(in: edit.replacement) == controlOrNewlineScalars(in: edit.original) else {
+                throw EditValidationError.invalidWhitespaceOrControlCharacters
+            }
+            if introducesDisallowedShellCharacters(from: edit.original, to: edit.replacement) {
+                throw EditValidationError.disallowedShellCharacters
+            }
+
+            let origEditWords = wordTokenRanges(in: edit.original)
+            let replEditWords = wordTokenRanges(in: edit.replacement)
+            guard !origEditWords.isEmpty, !replEditWords.isEmpty else {
+                throw EditValidationError.unalignedWordBoundary(edit.original)
+            }
+            guard origEditWords.count <= CloudCorrectionConfig.maxEditWordCount,
+                  replEditWords.count <= CloudCorrectionConfig.maxEditWordCount,
+                  abs(replEditWords.count - origEditWords.count) <= CloudCorrectionConfig.maxEditWordCountDelta,
+                  edit.replacement.count <= edit.original.count * 2 + 8,
+                  edit.replacement.unicodeScalars.count <= edit.original.unicodeScalars.count * 2 + 16 else {
+                throw EditValidationError.excessiveExpansion
+            }
+
+            let occurrences = findGraphemeOccurrences(of: edit.original, in: text)
             guard !occurrences.isEmpty else {
                 throw EditValidationError.originalNotFound(edit.original)
             }
             guard occurrences.count == 1, let range = occurrences.first else {
                 throw EditValidationError.ambiguousMatch(edit.original)
             }
+
+            guard !isStrictlyInsideAnyWord(range.lowerBound, wordRanges: textWordRanges),
+                  !isStrictlyInsideAnyWord(range.upperBound, wordRanges: textWordRanges) else {
+                throw EditValidationError.unalignedWordBoundary(edit.original)
+            }
+
+            if !protectedRanges.isEmpty,
+               let changedRange = changedRangeInText(
+                   matchRange: range,
+                   in: text,
+                   original: edit.original,
+                   replacement: edit.replacement
+               ),
+               protectedRanges.contains(where: { $0.overlaps(changedRange) }) {
+                throw EditValidationError.protectedDictionarySpan(edit.original)
+            }
+
             matched.append((range: range, edit: edit))
         }
 
@@ -33,8 +82,11 @@ public enum CorrectionEditValidator {
             }
         }
 
-        let totalWords = wordTokens(in: text).count
-        let maxAllowed = totalWords == 0 ? 0 : max(1, Int(Double(totalWords) * maxWordChangeRatio))
+        let totalWords = textWordRanges.count
+        let maxAllowed = totalWords < CloudCorrectionConfig.minWordsForCloudCorrection
+            ? 0
+            : Int(floor(Double(totalWords) * maxWordChangeRatio + 1e-9))
+
         var changedWords = 0
         for (_, edit) in matched {
             changedWords += changedWordCount(from: edit.original, to: edit.replacement)
@@ -57,18 +109,16 @@ public enum CorrectionEditValidator {
         }
         result.append(contentsOf: text[cursor..<text.endIndex])
 
-        if result.count > max(text.count * 2 + 128, 256) {
-            throw EditValidationError.excessiveChanges(
-                changedWords: max(changedWords, 1),
-                totalWords: totalWords,
-                maxAllowed: maxAllowed
-            )
+        if result.count > text.count * 2 + 16
+            || result.unicodeScalars.count > text.unicodeScalars.count * 2 + 32 {
+            throw EditValidationError.excessiveExpansion
         }
 
         return result
     }
 
     static func changedWordCount(from original: String, to replacement: String) -> Int {
+        guard original != replacement else { return 0 }
         var orig = wordTokens(in: original)
         var repl = wordTokens(in: replacement)
 
@@ -80,38 +130,137 @@ public enum CorrectionEditValidator {
             orig.removeLast()
             repl.removeLast()
         }
-        return max(orig.count, repl.count)
+        return max(1, max(orig.count, repl.count))
     }
 
     static func wordTokens(in text: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        for scalar in text.unicodeScalars {
-            let isWordChar = scalar.properties.isAlphabetic
-                || scalar.properties.generalCategory == .decimalNumber
-                || scalar.properties.generalCategory == .letterNumber
-                || scalar.properties.generalCategory == .otherNumber
-            if isWordChar {
-                current.unicodeScalars.append(scalar)
-            } else if !current.isEmpty {
-                tokens.append(current)
-                current = ""
-            }
-        }
-        if !current.isEmpty {
-            tokens.append(current)
-        }
-        return tokens
+        wordTokenRanges(in: text).map { String(text[$0]) }
     }
 
-    private static func findOccurrences(of substring: String, in text: String) -> [Range<String.Index>] {
+    private static func wordTokenRanges(in text: String) -> [Range<String.Index>] {
         var ranges: [Range<String.Index>] = []
-        var searchStart = text.startIndex
-        while searchStart < text.endIndex,
-              let range = text.range(of: substring, options: [.literal], range: searchStart..<text.endIndex) {
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { _, range, _, _ in
             ranges.append(range)
-            searchStart = range.upperBound
         }
         return ranges
+    }
+
+    private static func isStrictlyInsideAnyWord(_ index: String.Index, wordRanges: [Range<String.Index>]) -> Bool {
+        wordRanges.contains { $0.lowerBound < index && index < $0.upperBound }
+    }
+
+    private static func findGraphemeOccurrences(of substring: String, in text: String) -> [Range<String.Index>] {
+        let targetChars = Array(substring)
+        guard !targetChars.isEmpty else { return [] }
+
+        var charIndices: [String.Index] = []
+        charIndices.reserveCapacity(text.count)
+        var chars: [Character] = []
+        chars.reserveCapacity(text.count)
+
+        var idx = text.startIndex
+        while idx < text.endIndex {
+            charIndices.append(idx)
+            chars.append(text[idx])
+            idx = text.index(after: idx)
+        }
+
+        guard chars.count >= targetChars.count else { return [] }
+        var ranges: [Range<String.Index>] = []
+        let lastStart = chars.count - targetChars.count
+        for start in 0...lastStart {
+            if chars[start..<(start + targetChars.count)].elementsEqual(targetChars) {
+                let lower = charIndices[start]
+                let upper = (start + targetChars.count < charIndices.count)
+                    ? charIndices[start + targetChars.count]
+                    : text.endIndex
+                ranges.append(lower..<upper)
+            }
+        }
+        return ranges
+    }
+
+    private static func changedRangeInText(
+        matchRange: Range<String.Index>,
+        in text: String,
+        original: String,
+        replacement: String
+    ) -> Range<String.Index>? {
+        guard original != replacement else { return nil }
+
+        let origChars = Array(original)
+        let replChars = Array(replacement)
+
+        var matchCharBoundaries: [String.Index] = []
+        matchCharBoundaries.reserveCapacity(origChars.count + 1)
+        var cursor = matchRange.lowerBound
+        while cursor < matchRange.upperBound {
+            matchCharBoundaries.append(cursor)
+            cursor = text.index(after: cursor)
+        }
+        matchCharBoundaries.append(matchRange.upperBound)
+
+        guard matchCharBoundaries.count == origChars.count + 1 else {
+            return matchRange
+        }
+
+        var prefixLen = 0
+        while prefixLen < origChars.count,
+              prefixLen < replChars.count,
+              origChars[prefixLen] == replChars[prefixLen] {
+            prefixLen += 1
+        }
+        while prefixLen > 0 {
+            if origChars[prefixLen - 1].isWhitespace && replChars[prefixLen - 1].isWhitespace {
+                break
+            }
+            prefixLen -= 1
+        }
+
+        var suffixLen = 0
+        while suffixLen < origChars.count - prefixLen,
+              suffixLen < replChars.count - prefixLen,
+              origChars[origChars.count - 1 - suffixLen] == replChars[replChars.count - 1 - suffixLen] {
+            suffixLen += 1
+        }
+        while suffixLen > 0 {
+            if origChars[origChars.count - suffixLen].isWhitespace
+                && replChars[replChars.count - suffixLen].isWhitespace {
+                break
+            }
+            suffixLen -= 1
+        }
+
+        let lowerOffset = prefixLen
+        let upperOffset = origChars.count - suffixLen
+        guard lowerOffset < upperOffset else {
+            return matchRange
+        }
+        return matchCharBoundaries[lowerOffset]..<matchCharBoundaries[upperOffset]
+    }
+
+    private static func controlOrNewlineScalars(in text: String) -> [Unicode.Scalar] {
+        text.unicodeScalars.filter { scalar in
+            let category = scalar.properties.generalCategory
+            return category == .control
+                || category == .lineSeparator
+                || category == .paragraphSeparator
+                || CharacterSet.newlines.contains(scalar)
+        }
+    }
+
+    private static func introducesDisallowedShellCharacters(from original: String, to replacement: String) -> Bool {
+        var origCounts: [Unicode.Scalar: Int] = [:]
+        for scalar in original.unicodeScalars where shellSignificantScalars.contains(scalar) {
+            origCounts[scalar, default: 0] += 1
+        }
+        var replCounts: [Unicode.Scalar: Int] = [:]
+        for scalar in replacement.unicodeScalars where shellSignificantScalars.contains(scalar) {
+            replCounts[scalar, default: 0] += 1
+        }
+        for (scalar, count) in replCounts where count > origCounts[scalar, default: 0] {
+            return true
+        }
+        return false
     }
 }

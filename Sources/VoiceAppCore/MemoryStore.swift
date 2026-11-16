@@ -546,6 +546,28 @@ public final class MemoryStore: Sendable {
                 ALTER TABLE records ADD COLUMN correctionModel TEXT;
                 ALTER TABLE records ADD COLUMN correctionStatus TEXT;
                 ALTER TABLE records ADD COLUMN correctionReason TEXT;
+                CREATE TRIGGER records_correction_tombstone_insert BEFORE INSERT ON records
+                WHEN NEW.deletedAt IS NOT NULL AND (
+                    NEW.correctionInputText IS NOT NULL
+                    OR NEW.correctionProvider IS NOT NULL
+                    OR NEW.correctionModel IS NOT NULL
+                    OR NEW.correctionStatus IS NOT NULL
+                    OR NEW.correctionReason IS NOT NULL
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'tombstones cannot retain correction metadata');
+                END;
+                CREATE TRIGGER records_correction_tombstone_update BEFORE UPDATE ON records
+                WHEN NEW.deletedAt IS NOT NULL AND (
+                    NEW.correctionInputText IS NOT NULL
+                    OR NEW.correctionProvider IS NOT NULL
+                    OR NEW.correctionModel IS NOT NULL
+                    OR NEW.correctionStatus IS NOT NULL
+                    OR NEW.correctionReason IS NOT NULL
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'tombstones cannot retain correction metadata');
+                END;
                 """)
         }
         return migrator

@@ -670,7 +670,7 @@ private struct CorrectionSection: View {
                 HStack {
                     Text("\(correction.selectedProvider.displayName) API key")
                     Spacer()
-                    Text(hasSavedKey ? "Saved in Keychain" : "Not set")
+                    Text(hasSavedKey ? "Saved in login Keychain" : "Not set")
                         .font(.caption)
                         .foregroundStyle(hasSavedKey ? Theme.neon : Theme.textSecondary)
                 }
@@ -696,6 +696,9 @@ private struct CorrectionSection: View {
                         .buttonStyle(NeonButtonStyle())
                     }
                 }
+                Text("Stored in your macOS login Keychain (not synced to iCloud; may transfer via Migration Assistant).")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
             }
 
             if let keyError = correction.keyStoreError {
@@ -816,14 +819,18 @@ private struct CorrectionSection: View {
         }
         .task {
             refreshRunningApps()
+            await correction.refreshKeyPresence()
             if hasSavedKey {
                 await correction.refreshModels()
             }
         }
         .onChange(of: correction.selectedProvider) { _, newProvider in
             apiKeyInput = ""
-            if correction.hasKey(for: newProvider) {
-                Task { await correction.refreshModels(for: newProvider) }
+            Task {
+                await correction.refreshKeyPresence(for: newProvider)
+                if correction.hasKey(for: newProvider) {
+                    await correction.refreshModels(for: newProvider)
+                }
             }
         }
     }
