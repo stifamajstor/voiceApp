@@ -115,7 +115,7 @@ final class VoiceNotesTests: XCTestCase {
 
     func testMigrationBackfillsExistingNotesAndPreservesOtherRecords() async throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "main-store", withExtension: "sqlite", subdirectory: "Fixtures"))
+        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "main-29e9eda-store", withExtension: "sqlite", subdirectory: "Fixtures"))
         let path = directory.appending(path: "store.sqlite")
         try FileManager.default.copyItem(at: fixture, to: path)
         let database = try DatabaseQueue(path: path.path)

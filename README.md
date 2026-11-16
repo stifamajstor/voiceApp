@@ -9,7 +9,6 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Local dictation history with search, copy, and deletion.
 - Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
 - Voice notes with separate shortcuts, editing, done state, and in-app reminders.
-
 - Optional cloud correction in Settings using your own Anthropic or OpenAI API key (off by default).
 - No VoiceApp account or cloud transcription service.
 
@@ -129,7 +128,7 @@ Every deletion asks for confirmation with the number of dictations to remove and
 dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
 Search and deletion run in the background with a busy indicator; large deletes can take seconds.
 Quitting from the menu or through macOS application termination (including logout and updater relaunch)
-waits for an in-flight transcription and its save, plus queued saves and deletes, within one 30-second
+waits for an in-flight transcription, cloud corrections and their saves, plus queued saves and deletes, within one 30-second
 deadline, then proceeds even if work remains. New recordings are ignored while quitting; dictation paste
 may be skipped, but its history save still runs. While
 waiting, the menu says it is finishing history work, disables Quit, and ignores a second menu Quit request.
@@ -212,7 +211,7 @@ Responses API with `reasoning.effort: "none"` and `store: false`) model before p
 - **Circuit breaker:** After 3 consecutive request or validation failures, cloud correction pauses for 5 minutes and falls back to dictionary text without network calls.
 - **Structured edit contract:** Models receive system instructions explicitly separating untrusted JSON user-message data (`target_app`, `dictionary_terms`, `transcript`) and return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically on whole Unicode words and extended grapheme clusters, protects dictionary-replaced words, rejects control characters/newlines, leading/trailing whitespace changes, or new shell characters (`> < | & ; $ \` \`), rejects ambiguous or overlapping spans, bounds per-edit length/word expansion, and requires dictations to have at least 3 words while capping changed words at `floor(totalWords * 0.40)`.
 - **Models and testing:** Settings populates the model picker from each provider's `GET /v1/models` endpoint (OpenAI is filtered to a short allowlist of fast `reasoning.effort: "none"` models: `gpt-6-luna`, `gpt-6.1-terra`) and includes a **Test** button that sends a short sample and displays latency or errors in plain words.
-- **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. Voice notes (`RecordKind.note`) never run through this dictation pass. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
+- **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. Voice notes (`RecordKind.note`) never run through this dictation pass; they save dictionary text with NULL cloud metadata and do not wait for pending dictation pastes. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
 
 ## Troubleshooting
 

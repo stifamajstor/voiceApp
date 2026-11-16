@@ -585,7 +585,7 @@ final class CloudCorrectionTests: XCTestCase {
         service.addExcludedBundleID("com.apple.Terminal")
 
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
         await history.start().value
@@ -641,7 +641,7 @@ final class CloudCorrectionTests: XCTestCase {
         service.isEnabled = true
 
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
         await history.start().value
@@ -704,7 +704,7 @@ final class CloudCorrectionTests: XCTestCase {
         service.isEnabled = true
 
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
         await history.start().value
@@ -989,7 +989,7 @@ final class CloudCorrectionTests: XCTestCase {
         service.isEnabled = true
 
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
         await history.start().value
@@ -1039,6 +1039,25 @@ final class CloudCorrectionTests: XCTestCase {
         XCTAssertTrue(secondRequestFinished.isMarked)
         XCTAssertEqual(pasted, [], "Second dictation must wait for first dictation's ordered paste")
 
+        // A note recorded between dictations saves immediately without joining their paste queue.
+        XCTAssertTrue(coordinator.beginRecording(trigger: .noteToggle))
+        XCTAssertEqual(coordinator.activeTrigger?.destination, .note)
+        XCTAssertTrue(coordinator.beginTranscribing())
+        coordinator.finishTranscribing()
+        let noteDelivery = coordinator.enqueueDelivery {
+            _ = try? await delivery.deliver(
+                rawText: "A local voice note.", appBundleID: "com.apple.Notes", appName: "Notes",
+                modelID: "test", durationSeconds: 1, destination: .note
+            ) { _ in XCTFail("The interleaved note must never paste") }
+        }
+        await noteDelivery.value
+        await history.pendingSave?.value
+        let noteStore = try MemoryStore(directory: directory)
+        XCTAssertEqual(try noteStore.notes().map(\.text), ["A local voice note."])
+        try noteStore.close()
+        XCTAssertEqual(transport.requestCount, 2, "Only the two dictations reach the provider")
+        XCTAssertEqual(pasted, [], "Saving a note must not release either dictation's paste ticket")
+
         await releaseFirstRequest.open()
         await coordinator.waitForPendingDeliveries()
 
@@ -1066,7 +1085,7 @@ final class CloudCorrectionTests: XCTestCase {
         service.isEnabled = true
 
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
         await history.start().value
@@ -1075,21 +1094,26 @@ final class CloudCorrectionTests: XCTestCase {
         var pasted: [String] = []
         let delivered = try await delivery.deliver(
             rawText: "I would load it.",
-            kind: .note,
             appBundleID: "com.apple.Notes",
             appName: "Notes",
             modelID: "parakeet-tdt-0.6b-v3",
-            durationSeconds: 1.0
+            durationSeconds: 1.0,
+            destination: .note
         ) { pasted.append($0) }
 
         XCTAssertTrue(delivered)
-        XCTAssertEqual(pasted, ["I would load it."])
+        XCTAssertEqual(pasted, [])
         XCTAssertEqual(transport.requestCount, 0)
 
         await history.pendingSave?.value
         let store = try MemoryStore(directory: directory)
         defer { try? store.close() }
-        let saved = try XCTUnwrap(store.listRecent(limit: 1).first)
+        let saved = try XCTUnwrap(store.notes().first?.record)
+        XCTAssertEqual(saved.kind, .note)
+        XCTAssertEqual(saved.finalText, "I would load it.")
+        XCTAssertNil(saved.correctionInputText)
+        XCTAssertNil(saved.correctionModel)
+        XCTAssertNil(saved.correctionReason)
         XCTAssertNil(saved.correctionStatus)
         XCTAssertNil(saved.correctionProvider)
     }
@@ -1148,13 +1172,21 @@ final class CloudCorrectionTests: XCTestCase {
     }
 
     func testStoreMigrationPreservesMainFixtureAndEnforcesTombstoneTriggers() throws {
+        try assertMainFixtureMigrates("main-9907e84-store")
+    }
+
+    func testStoreMigrationPreservesVoiceNotesMainFixtureAndEnforcesTombstoneTriggers() throws {
+        try assertMainFixtureMigrates("main-0672c02-store")
+    }
+
+    private func assertMainFixtureMigrates(_ fixtureName: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        // Created using unmodified store sources at main 9907e84 with 3 migrations, live record, tombstone, and dictionary term.
-        let fixture = try XCTUnwrap(Bundle.module.url(forResource: "main-9907e84-store", withExtension: "sqlite", subdirectory: "Fixtures"))
+        // Fixtures were created by the unmodified MemoryStore at the named main commits.
+        let fixture = try XCTUnwrap(Bundle.module.url(forResource: fixtureName, withExtension: "sqlite", subdirectory: "Fixtures"))
         try FileManager.default.copyItem(at: fixture, to: directory.appending(path: "store.sqlite"))
 
         var store: MemoryStore? = try MemoryStore(directory: directory)
-        let legacy = try XCTUnwrap(store?.listRecent().first)
+        let legacy = try XCTUnwrap(store?.listRecent(kind: .dictation).first)
         XCTAssertEqual(legacy.rawText, "main migration survivor")
         XCTAssertNil(legacy.correctionInputText)
         XCTAssertNil(legacy.correctionProvider)
@@ -1162,6 +1194,20 @@ final class CloudCorrectionTests: XCTestCase {
         XCTAssertNil(legacy.correctionStatus)
         XCTAssertNil(legacy.correctionReason)
         XCTAssertEqual(try store?.listTerms().map(\.text), ["VoiceApp"])
+
+        if fixtureName == "main-0672c02-store" {
+            let note = try XCTUnwrap(store?.notes(query: "edited survivor").first)
+            XCTAssertEqual(note.record.rawText, "main note raw")
+            XCTAssertEqual(note.record.finalText, "main note final")
+            XCTAssertEqual(note.text, "edited survivor note")
+            XCTAssertEqual(note.reminderDate, Date(timeIntervalSince1970: 1_900_000_000))
+            XCTAssertEqual(note.reminderScheduledFor, note.reminderDate)
+            XCTAssertNil(note.record.correctionStatus)
+            XCTAssertEqual(try store?.notes().filter(\.isDone).count, 1)
+            try store?.close()
+            store = try MemoryStore(directory: directory)
+            XCTAssertEqual(try store?.note(id: note.id), note)
+        }
 
         let added = try XCTUnwrap(store?.append(
             rawText: "I would load it.",
@@ -1195,6 +1241,9 @@ final class CloudCorrectionTests: XCTestCase {
                 "memoryStore.createRecords",
                 "memoryStore.indexRecordText",
                 "dictionary.createTerms",
+                "notes.createState",
+                "notes.localReminders",
+                "notes.reminderHandoff",
                 "correction.addMetadata",
             ])
             let row = try XCTUnwrap(Row.fetchOne(db, sql: """

@@ -156,7 +156,10 @@ public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
     public func appendNote(_ note: CompletedDictation) async throws {
         try availableStore().append(id: note.id, kind: .note, createdAt: note.createdAt,
             rawText: note.rawText, finalText: note.finalText, appBundleID: note.appBundleID,
-            appName: note.appName, modelID: note.modelID, durationSeconds: note.durationSeconds)
+            appName: note.appName, modelID: note.modelID, durationSeconds: note.durationSeconds,
+            // Notes receive only the local dictionary pass; cloud metadata is deliberately absent.
+            correctionInputText: nil, correctionProvider: nil, correctionModel: nil,
+            correctionStatus: nil, correctionReason: nil)
     }
 
     public func note(id: UUID) async throws -> VoiceNote? { try availableStore().note(id: id) }
