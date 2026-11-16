@@ -4,10 +4,8 @@ import VoiceAppCore
 
 /// Orchestrates hotkey -> record -> transcribe -> cloud correct -> paste.
 ///
-/// State machine: idle -> recording -> transcribing -> idle, with `error(message)` as a transient
-/// state that clears itself after a few seconds. Once local transcription completes, control returns
-/// to `.idle` immediately so a new recording can begin even while an earlier dictation's cloud
-/// correction and ordered paste are still in flight.
+/// Capture stays busy through transcription, correction and paste. A shortcut during
+/// correction gets the existing error sound; its key-up cannot cancel another recording.
 @MainActor
 final class DictationController: ObservableObject {
     typealias State = DictationSessionCoordinator.State
@@ -81,7 +79,7 @@ final class DictationController: ObservableObject {
     // MARK: Hotkey handlers
 
     private func pushToTalkDown() {
-        // While a toggle session is running (or local transcription is running) the press is ignored;
+        // While capture or delivery is busy, a new press cannot start another recording;
         // because no session is attributed to push-to-talk, its key-up will be ignored as well.
         beginRecording(trigger: .pushToTalk)
     }
@@ -115,7 +113,8 @@ final class DictationController: ObservableObject {
     // MARK: Recording
 
     private func beginRecording(trigger: CaptureTrigger) {
-        guard !isQuitting, session.canBeginRecording(), !isRequestingMicrophone else { return }
+        guard !isQuitting, session.canBeginRecording(onBusy: { self.playSound("Basso") }),
+              !isRequestingMicrophone else { return }
 
         guard modelManager.isReady else {
             showError("No model ready — pick and download one in Settings")
@@ -190,13 +189,13 @@ final class DictationController: ObservableObject {
         state = session.state
         transcriptionTask = Task { [weak self] in
             defer { self?.transcriptionTask = nil }
-            await self?.transcribeAndEnqueueDelivery(samples, durationSeconds: duration, destination: destination)
+            await self?.transcribeAndInsert(samples, durationSeconds: duration, destination: destination)
         }
     }
 
     // MARK: Transcription & Delivery
 
-    private func transcribeAndEnqueueDelivery(_ samples: [Float], durationSeconds: Double, destination: CaptureDestination) async {
+    private func transcribeAndInsert(_ samples: [Float], durationSeconds: Double, destination: CaptureDestination) async {
         let modelID = modelManager.selectedModelID
         let rawText: String
         do {
@@ -217,35 +216,32 @@ final class DictationController: ObservableObject {
         let appName = destination == .note ? recordingAppName : target?.localizedName
         let keepOnClipboard = UserDefaults.standard.bool(forKey: TextInserter.keepOnClipboardKey)
 
-        // Local transcription is done: allow new shortcuts right away while cloud correction
-        // and ordered paste complete in the background.
-        session.finishTranscribing()
-        state = session.state
-
-        session.enqueueDelivery { [weak self] in
-            guard let self else { return }
-            do {
-                _ = try await self.delivery.deliver(
-                    rawText: rawText,
-                    appBundleID: appBundleID,
-                    appName: appName,
-                    modelID: modelID,
-                    durationSeconds: durationSeconds,
-                    destination: destination
-                ) { text in
-                    guard !self.isQuitting else { return }
-                    try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
+        do {
+            _ = try await delivery.deliver(
+                rawText: rawText,
+                appBundleID: appBundleID,
+                appName: appName,
+                modelID: modelID,
+                durationSeconds: durationSeconds,
+                destination: destination,
+                willCorrect: {
+                    self.session.beginCorrecting()
+                    self.state = self.session.state
                 }
-            } catch {
-                if case TextInserter.InsertError.accessibilityNotGranted = error,
-                   !self.promptedAccessibilityThisLaunch {
-                    self.promptedAccessibilityThisLaunch = true
-                    Permissions.promptAccessibility()
-                }
-                if case .idle = self.session.state {
-                    self.showError(error.localizedDescription)
-                }
+            ) { text in
+                guard !self.isQuitting else { return }
+                try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard,
+                                              targetProcessID: target?.processIdentifier)
             }
+            session.finishTranscribing()
+            state = session.state
+        } catch {
+            if case TextInserter.InsertError.accessibilityNotGranted = error,
+               !promptedAccessibilityThisLaunch {
+                promptedAccessibilityThisLaunch = true
+                Permissions.promptAccessibility()
+            }
+            showError(error.localizedDescription)
         }
     }
 

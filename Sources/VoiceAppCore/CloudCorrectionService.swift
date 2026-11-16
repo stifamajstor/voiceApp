@@ -151,12 +151,16 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
     private var circuitBreaker: CorrectionCircuitBreaker
     private var keyWriteGeneration: [CloudProviderID: Int] = [:]
 
+    private nonisolated static let defaultSleep: @Sendable (Duration) async throws -> Void = {
+        try await Task.sleep(for: $0)
+    }
+
     public convenience init(
         secretStore: any SecretStore = KeychainSecretStore(),
         transport: any HTTPTransport = URLSessionHTTPTransport(),
         defaults: UserDefaults = .standard,
         deadline: Duration = CloudCorrectionConfig.requestDeadline,
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        sleep: (@Sendable (Duration) async throws -> Void)? = nil,
         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         log: @escaping @Sendable (String) -> Void = {
             Logger(subsystem: "com.local.voiceapp", category: "CloudCorrection").error("\($0, privacy: .public)")
@@ -181,7 +185,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         providers: [CloudProviderID: any CloudCorrectionProvider],
         defaults: UserDefaults = .standard,
         deadline: Duration = CloudCorrectionConfig.requestDeadline,
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        sleep: (@Sendable (Duration) async throws -> Void)? = nil,
         now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         log: @escaping @Sendable (String) -> Void = {
             Logger(subsystem: "com.local.voiceapp", category: "CloudCorrection").error("\($0, privacy: .public)")
@@ -191,7 +195,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         self.providers = providers
         self.defaults = defaults
         self.deadline = deadline
-        self.sleep = sleep
+        self.sleep = sleep ?? Self.defaultSleep
         self.log = log
         self.circuitBreaker = CorrectionCircuitBreaker(now: now)
 
@@ -448,6 +452,11 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
                 status: .skipped,
                 reason: "App excluded"
             )
+        }
+
+        guard CorrectionEditValidator.wordTokens(in: text).count >= CloudCorrectionConfig.minWordsForCloudCorrection else {
+            return CorrectionOutcome(outputText: text, provider: providerID, modelID: modelID,
+                                     status: .skipped, reason: "too short")
         }
 
         guard circuitBreaker.canAttempt() else {

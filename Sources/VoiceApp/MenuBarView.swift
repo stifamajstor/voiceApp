@@ -221,7 +221,7 @@ struct MenuBarView: View {
     // MARK: - Dictation state presentation
 
     private var isBusy: Bool {
-        dictation.state == .recording || dictation.state == .transcribing
+        dictation.state == .recording || dictation.state == .transcribing || dictation.state == .correcting
     }
 
     private var dictationTitle: String {
@@ -229,6 +229,7 @@ struct MenuBarView: View {
         case .idle: return modelManager.isReady ? "Ready to dictate" : "Not ready"
         case .recording: return "Recording…"
         case .transcribing: return "Transcribing…"
+        case .correcting: return "Correcting…"
         case .error(let message): return message
         }
     }
@@ -238,6 +239,7 @@ struct MenuBarView: View {
         case .idle: return modelManager.isReady ? "mic" : "mic.slash"
         case .recording: return "mic.fill"
         case .transcribing: return "waveform"
+        case .correcting: return "text.badge.checkmark"
         case .error: return "exclamationmark.triangle"
         }
     }
@@ -245,7 +247,7 @@ struct MenuBarView: View {
     private var dictationColor: Color {
         switch dictation.state {
         case .idle: return modelManager.isReady ? Theme.neon : Theme.textSecondary
-        case .recording, .transcribing: return Theme.neon
+        case .recording, .transcribing, .correcting: return Theme.neon
         case .error: return Theme.warning
         }
     }

@@ -294,7 +294,7 @@ final class CloudCorrectionTests: XCTestCase {
         )
         service.isEnabled = true
 
-        let outcome = await service.correct("hello", dictionaryTerms: [], appBundleID: "com.apple.Notes", appName: "Notes")
+        let outcome = await service.correct("hello from here", dictionaryTerms: [], appBundleID: "com.apple.Notes", appName: "Notes")
         XCTAssertEqual(outcome.status, .fallback)
         XCTAssertFalse(outcome.reason?.contains(secret) ?? false)
 
@@ -562,8 +562,8 @@ final class CloudCorrectionTests: XCTestCase {
         // Enabled, but no key -> zero network calls.
         try disabledService.removeAPIKey()
         disabledService.isEnabled = true
-        let noKeyOutcome = await disabledService.correct("hello", dictionaryTerms: [], appBundleID: "com.apple.Notes", appName: "Notes")
-        XCTAssertEqual(noKeyOutcome.outputText, "hello")
+        let noKeyOutcome = await disabledService.correct("hello from here", dictionaryTerms: [], appBundleID: "com.apple.Notes", appName: "Notes")
+        XCTAssertEqual(noKeyOutcome.outputText, "hello from here")
         XCTAssertNil(noKeyOutcome.status)
         XCTAssertEqual(transport.requestCount, 0)
     }
@@ -952,121 +952,83 @@ final class CloudCorrectionTests: XCTestCase {
         XCTAssertEqual(neverCalledTransport.requestCount, 0)
     }
 
-    func testNewRecordingCanStartWhileCloudCorrectionRunsAndPastesStayOrdered() async throws {
-        let releaseFirstRequest = AsyncGate()
-        let secondRequestFinished = ExpectationFlag()
-
+    func testCorrectionBlocksEveryRecordingShortcutWithFeedbackUntilPasteFinishes() async throws {
+        let gate = AsyncGate()
+        let entered = expectation(description: "cloud request started")
         let transport = StubHTTPTransport { request in
-            let url = try XCTUnwrap(request.url)
-            let json = try jsonObject(from: request.httpBody)
-            let messages = try XCTUnwrap(json["messages"] as? [[String: Any]])
-            let content = try XCTUnwrap(messages.first?["content"] as? String)
-            let userPayload = try jsonObject(from: Data(content.utf8))
-            let transcript = try XCTUnwrap(userPayload["transcript"] as? String)
-
-            if transcript.contains("first") {
-                await releaseFirstRequest.wait()
-                let payload = """
-                {"content":[{"type":"text","text":"{\\"edits\\":[{\\"original\\":\\"load\\",\\"replacement\\":\\"love\\"}]}"}],"stop_reason":"end_turn"}
-                """
-                return httpResponse(url: url, statusCode: 200, body: payload)
-            } else {
-                secondRequestFinished.mark()
-                let payload = """
-                {"content":[{"type":"text","text":"{\\"edits\\":[{\\"original\\":\\"bare\\",\\"replacement\\":\\"bear\\"}]}"}],"stop_reason":"end_turn"}
-                """
-                return httpResponse(url: url, statusCode: 200, body: payload)
-            }
+            entered.fulfill()
+            await gate.wait()
+            return httpResponse(url: request.url!, statusCode: 200,
+                body: "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"edits\\\":[]}\"}],\"stop_reason\":\"end_turn\"}")
         }
-
-        let secretStore = InMemorySecretStore()
-        try secretStore.write("sk-ant-ordered", account: CloudProviderID.anthropic.rawValue)
-        let service = CloudCorrectionService(
-            secretStore: secretStore,
-            transport: transport,
-            defaults: defaults
-        )
+        let secrets = InMemorySecretStore()
+        try secrets.write("test-placeholder", account: "anthropic")
+        let service = CloudCorrectionService(secretStore: secrets, transport: transport, defaults: defaults)
         service.isEnabled = true
-
         let repository = SQLiteHistoryRepository(directory: directory)
         let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
-        let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
         await history.start().value
         await dictionary.start().value
-
-        let coordinator = DictationSessionCoordinator()
+        let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
+        let session = DictationSessionCoordinator()
+        XCTAssertTrue(session.beginRecording(trigger: .pushToTalk))
+        XCTAssertTrue(session.beginTranscribing())
         var pasted: [String] = []
-
-        // First recording -> local transcription finishes -> state immediately returns to idle.
-        XCTAssertTrue(coordinator.beginRecording(trigger: .pushToTalk))
-        XCTAssertTrue(coordinator.beginTranscribing())
-        coordinator.finishTranscribing()
-        XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertTrue(coordinator.canBeginRecording())
-
-        coordinator.enqueueDelivery {
-            _ = try? await delivery.deliver(
-                rawText: "I would load the first draft.",
-                appBundleID: "com.apple.Notes",
-                appName: "Notes",
-                modelID: "parakeet-tdt-0.6b-v3",
-                durationSeconds: 1.0
-            ) { pasted.append($0) }
+        let pasteEntered = expectation(description: "paste suspended")
+        let pasteGate = AsyncGate()
+        let task = Task {
+            _ = try await delivery.deliver(rawText: "I would load it.", appBundleID: nil,
+                appName: nil, modelID: "test", durationSeconds: 1,
+                willCorrect: { session.beginCorrecting() }) {
+                    pasted.append($0)
+                    pasteEntered.fulfill()
+                    await pasteGate.wait()
+                }
+            session.finishTranscribing()
         }
-        XCTAssertEqual(coordinator.pendingDeliveryCount, 1)
-
-        // Second recording starts immediately while the first cloud request is still in flight.
-        XCTAssertTrue(coordinator.beginRecording(trigger: .toggle))
-        XCTAssertEqual(coordinator.state, .recording)
-        XCTAssertTrue(coordinator.beginTranscribing())
-        coordinator.finishTranscribing()
-        XCTAssertEqual(coordinator.state, .idle)
-
-        coordinator.enqueueDelivery {
-            _ = try? await delivery.deliver(
-                rawText: "I can bare the second draft.",
-                appBundleID: "com.apple.Notes",
-                appName: "Notes",
-                modelID: "parakeet-tdt-0.6b-v3",
-                durationSeconds: 1.0
-            ) { pasted.append($0) }
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertEqual(session.state, .correcting)
+        var feedback = 0
+        for trigger: CaptureTrigger in [.pushToTalk, .toggle, .notePushToTalk, .noteToggle] {
+            XCTAssertFalse(session.beginRecording(trigger: trigger, onBusy: { feedback += 1 }))
+            XCTAssertNil(session.activeTrigger)
         }
-        XCTAssertEqual(coordinator.pendingDeliveryCount, 2)
-
-        // Wait until the fast second cloud request finishes while first is still blocked.
-        try await Task.sleep(for: .milliseconds(80))
-        XCTAssertTrue(secondRequestFinished.isMarked)
-        XCTAssertEqual(pasted, [], "Second dictation must wait for first dictation's ordered paste")
-
-        // A note recorded between dictations saves immediately without joining their paste queue.
-        XCTAssertTrue(coordinator.beginRecording(trigger: .noteToggle))
-        XCTAssertEqual(coordinator.activeTrigger?.destination, .note)
-        XCTAssertTrue(coordinator.beginTranscribing())
-        coordinator.finishTranscribing()
-        let noteDelivery = coordinator.enqueueDelivery {
-            _ = try? await delivery.deliver(
-                rawText: "A local voice note.", appBundleID: "com.apple.Notes", appName: "Notes",
-                modelID: "test", durationSeconds: 1, destination: .note
-            ) { _ in XCTFail("The interleaved note must never paste") }
-        }
-        await noteDelivery.value
+        XCTAssertEqual(feedback, 4)
+        session.cancelRecording() // synthetic keyDown cannot discard a new recording: none started
+        XCTAssertEqual(session.state, .correcting)
+        await gate.open()
+        await fulfillment(of: [pasteEntered], timeout: 2)
+        XCTAssertFalse(session.canBeginRecording())
+        await pasteGate.open()
+        try await task.value
+        XCTAssertEqual(pasted, ["I would load it."])
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertTrue(session.beginRecording(trigger: .pushToTalk))
+        XCTAssertEqual(session.state, .recording)
         await history.pendingSave?.value
-        let noteStore = try MemoryStore(directory: directory)
-        XCTAssertEqual(try noteStore.notes().map(\.text), ["A local voice note."])
-        try noteStore.close()
-        XCTAssertEqual(transport.requestCount, 2, "Only the two dictations reach the provider")
-        XCTAssertEqual(pasted, [], "Saving a note must not release either dictation's paste ticket")
+    }
 
-        await releaseFirstRequest.open()
-        await coordinator.waitForPendingDeliveries()
-
-        XCTAssertEqual(coordinator.pendingDeliveryCount, 0)
-        XCTAssertEqual(pasted, [
-            "I would love the first draft.",
-            "I can bear the second draft.",
-        ])
-        await history.pendingSave?.value
+    func testTooShortSkipsKeychainAndTransportWithoutOpeningBreaker() async throws {
+        let store = ThreadRecordingSecretStore(value: "test-placeholder")
+        let transport = StubHTTPTransport { request in
+            httpResponse(url: request.url!, statusCode: 503, body: "{}")
+        }
+        let service = CloudCorrectionService(secretStore: store, transport: transport, defaults: defaults)
+        service.isEnabled = true
+        for text in ["thanks", "sounds good", "yes"] {
+            let outcome = await service.correct(text, dictionaryTerms: [], appBundleID: nil, appName: nil)
+            XCTAssertEqual(outcome.outputText, text)
+            XCTAssertEqual(outcome.status, .skipped)
+            XCTAssertEqual(outcome.reason, "too short")
+            XCTAssertFalse(service.isCircuitOpen)
+        }
+        XCTAssertEqual(store.readCount, 0)
+        XCTAssertEqual(transport.requestCount, 0)
+        let long = await service.correct("I would load it today", dictionaryTerms: [], appBundleID: nil, appName: nil)
+        XCTAssertEqual(long.status, .fallback)
+        XCTAssertEqual(transport.requestCount, 1)
+        XCTAssertFalse(service.isCircuitOpen, "Only the long dictation counts as one failure")
     }
 
     func testVoiceNotesBypassCloudCorrection() async throws {

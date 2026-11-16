@@ -3,10 +3,14 @@ import Foundation
 
 @MainActor
 public final class DictationDelivery {
+    public struct TargetChanged: LocalizedError {
+        public init() {}
+        public var errorDescription: String? { "Copied to clipboard — the target app changed" }
+    }
+
     private let history: DictationHistory
     private let dictionary: UserDictionary
     private let cloudCorrection: (any CloudCorrecting)?
-    private var lastDeliveryTicket: DeliveryTicket?
 
     public init(
         history: DictationHistory,
@@ -25,6 +29,7 @@ public final class DictationDelivery {
         modelID: String,
         durationSeconds: Double,
         destination: CaptureDestination = .dictation,
+        willCorrect: () -> Void = {},
         paste: (String) async throws -> Void
     ) async throws -> Bool {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -33,14 +38,6 @@ public final class DictationDelivery {
         }
 
         let kind: RecordKind = destination == .dictation ? .dictation : .note
-
-        // Claim this dictation's paste slot before awaiting cloud correction so
-        // overlapping dictations paste strictly in submission order even when a
-        // later correction completes faster.
-        let previousDelivery = kind == .dictation ? lastDeliveryTicket : nil
-        let currentDelivery = DeliveryTicket()
-        if kind == .dictation { lastDeliveryTicket = currentDelivery }
-        defer { currentDelivery.finish() }
 
         let dictionaryResult = dictionary.correct(text)
         let dictionaryText = dictionaryResult.text
@@ -52,6 +49,7 @@ public final class DictationDelivery {
         // Voice notes (.note) bypass cloud correction and remain guarded against accidental routing.
         let outcome: CorrectionOutcome
         if let cloudCorrection, kind == .dictation {
+            willCorrect()
             outcome = await cloudCorrection.correct(
                 dictionaryText,
                 dictionaryTerms: dictionary.terms.map(\.text),
@@ -62,8 +60,6 @@ public final class DictationDelivery {
         } else {
             outcome = CorrectionOutcome(outputText: dictionaryText)
         }
-
-        await previousDelivery?.wait()
 
         let completed = CompletedDictation(
             rawText: rawText,
@@ -88,64 +84,40 @@ public final class DictationDelivery {
     }
 }
 
-@MainActor
-private final class DeliveryTicket {
-    private var isComplete = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func wait() async {
-        guard !isComplete else { return }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
-    }
-
-    func finish() {
-        guard !isComplete else { return }
-        isComplete = true
-        let pending = waiters
-        waiters.removeAll()
-        for waiter in pending {
-            waiter.resume()
-        }
-    }
-}
-
-/// Manages dictation recording/transcription state while permitting a new recording
-/// to start as soon as local transcription completes, even if an earlier dictation's
-/// cloud correction or paste is still in flight.
+/// Keeps capture busy until its transcription, correction and paste have finished.
 @MainActor
 public final class DictationSessionCoordinator: ObservableObject {
     public enum State: Equatable, Sendable {
         case idle
         case recording
         case transcribing
+        case correcting
         case error(String)
     }
 
     public typealias Trigger = CaptureTrigger
 
     @Published public private(set) var state: State = .idle
-    @Published public private(set) var pendingDeliveryCount = 0
 
     public private(set) var activeTrigger: Trigger?
 
-    private var deliveryTasks: [UUID: Task<Void, Never>] = [:]
-
     public init() {}
 
-    public func canBeginRecording() -> Bool {
+    public func canBeginRecording(onBusy: () -> Void = {}) -> Bool {
         switch state {
         case .idle, .error:
             return true
+        case .correcting:
+            onBusy()
+            return false
         case .recording, .transcribing:
             return false
         }
     }
 
     @discardableResult
-    public func beginRecording(trigger: Trigger) -> Bool {
-        guard canBeginRecording() else { return false }
+    public func beginRecording(trigger: Trigger, onBusy: () -> Void = {}) -> Bool {
+        guard canBeginRecording(onBusy: onBusy) else { return false }
         activeTrigger = trigger
         state = .recording
         return true
@@ -171,7 +143,7 @@ public final class DictationSessionCoordinator: ObservableObject {
     }
 
     public func finishTranscribing(hasError: Bool = false) {
-        guard state == .transcribing, !hasError else { return }
+        guard (state == .transcribing || state == .correcting), !hasError else { return }
         state = .idle
     }
 
@@ -186,28 +158,8 @@ public final class DictationSessionCoordinator: ObservableObject {
         }
     }
 
-    /// Launches delivery in the background after local transcription finishes so new
-    /// shortcuts can start recording immediately while keeping paste FIFO-ordered.
-    @discardableResult
-    public func enqueueDelivery(_ work: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
-        let id = UUID()
-        pendingDeliveryCount += 1
-        let task = Task { @MainActor [weak self] in
-            defer {
-                if let self {
-                    self.pendingDeliveryCount = max(0, self.pendingDeliveryCount - 1)
-                    self.deliveryTasks.removeValue(forKey: id)
-                }
-            }
-            await work()
-        }
-        deliveryTasks[id] = task
-        return task
-    }
-
-    public func waitForPendingDeliveries() async {
-        while let task = deliveryTasks.values.first {
-            await task.value
-        }
+    public func beginCorrecting() {
+        guard state == .transcribing else { return }
+        state = .correcting
     }
 }

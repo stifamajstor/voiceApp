@@ -5,8 +5,8 @@ public struct CompletedDictation: Sendable {
     public let createdAt: Date
     public let rawText: String
     public let finalText: String
-    public let appBundleID: String?
-    public let appName: String?
+    public var appBundleID: String?
+    public var appName: String?
     public let modelID: String
     public let durationSeconds: Double
     public let correctionInputText: String?

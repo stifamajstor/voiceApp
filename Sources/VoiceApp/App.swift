@@ -38,7 +38,7 @@ struct VoiceApp: App {
         _notesWindow = StateObject(wrappedValue: notesWindow)
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        let termination = HistoryTermination(history: history, session: dictation.session,
+        let termination = HistoryTermination(history: history,
             pendingTranscription: { dictation.transcriptionTask },
             prepareToQuit: { dictation.isQuitting = true },
             quitCancelled: { dictation.isQuitting = false }, showHistory: {
@@ -90,6 +90,8 @@ struct MenuBarIcon: View {
         switch dictation.state {
         case .recording:
             Image(nsImage: Self.recordingImage)
+        case .correcting:
+            Image(systemName: "text.badge.checkmark").help("Correcting…")
         case .transcribing:
             Image(nsImage: Self.transcribingImage)
         case .error:

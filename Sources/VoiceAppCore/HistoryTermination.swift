@@ -5,7 +5,6 @@ import Foundation
 public final class HistoryTermination: ObservableObject {
     @Published public private(set) var isQuitPending = false
     private let history: DictationHistory
-    private let session: DictationSessionCoordinator?
     private let pendingTranscription: () -> Task<Void, Never>?
     private let quitCancelled: () -> Void
     private let prepareToQuit: () -> Void
@@ -14,11 +13,10 @@ public final class HistoryTermination: ObservableObject {
     private(set) var waiting: Task<Void, Never>?
     private(set) var deadline: Task<Void, Never>?
 
-    public init(history: DictationHistory, session: DictationSessionCoordinator? = nil, pendingTranscription: @escaping () -> Task<Void, Never>? = { nil },
+    public init(history: DictationHistory, pendingTranscription: @escaping () -> Task<Void, Never>? = { nil },
                 prepareToQuit: @escaping () -> Void = {}, quitCancelled: @escaping () -> Void = {}, showHistory: @escaping () -> Void = {},
                 waitForDeadline: (@Sendable (Duration) async throws -> Void)? = nil) {
         self.history = history
-        self.session = session
         self.pendingTranscription = pendingTranscription
         self.prepareToQuit = prepareToQuit
         self.quitCancelled = quitCancelled
@@ -33,14 +31,13 @@ public final class HistoryTermination: ObservableObject {
     public func requestTermination(reply: @escaping (Bool) -> Void) -> Bool {
         guard !isQuitPending else { return false }
         let transcription = pendingTranscription()
-        guard history.pendingSave != nil || transcription != nil || (session?.pendingDeliveryCount ?? 0) > 0 else { return true }
+        guard history.pendingSave != nil || transcription != nil else { return true }
         prepareToQuit()
         isQuitPending = true
         let deleteFailures = history.deleteFailures
         waiting = Task {
             await transcription?.value
             guard !Task.isCancelled else { return }
-            await session?.waitForPendingDeliveries()
             while let tail = history.pendingSave, !Task.isCancelled {
                 await tail.value
             }

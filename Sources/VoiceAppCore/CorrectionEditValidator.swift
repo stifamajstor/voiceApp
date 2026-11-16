@@ -30,6 +30,20 @@ public enum CorrectionEditValidator {
             guard controlOrNewlineScalars(in: edit.replacement) == controlOrNewlineScalars(in: edit.original) else {
                 throw EditValidationError.invalidWhitespaceOrControlCharacters
             }
+            if let first = edit.replacement.unicodeScalars.first {
+                let category = first.properties.generalCategory
+                guard category != .nonspacingMark, category != .spacingMark,
+                      category != .enclosingMark, category != .format,
+                      !first.properties.isDefaultIgnorableCodePoint else {
+                    throw EditValidationError.invalidWhitespaceOrControlCharacters
+                }
+            }
+            // Preserve existing emoji joiners/variation selectors only inside the same grapheme.
+            let originalInvisibleGraphemes = edit.original.filter { $0.unicodeScalars.contains(where: isInvisible) }
+            let replacementInvisibleGraphemes = edit.replacement.filter { $0.unicodeScalars.contains(where: isInvisible) }
+            guard originalInvisibleGraphemes == replacementInvisibleGraphemes else {
+                throw EditValidationError.invalidWhitespaceOrControlCharacters
+            }
             if introducesDisallowedShellCharacters(from: edit.original, to: edit.replacement) {
                 throw EditValidationError.disallowedShellCharacters
             }
@@ -87,18 +101,6 @@ public enum CorrectionEditValidator {
             ? 0
             : Int(floor(Double(totalWords) * maxWordChangeRatio + 1e-9))
 
-        var changedWords = 0
-        for (_, edit) in matched {
-            changedWords += changedWordCount(from: edit.original, to: edit.replacement)
-        }
-        if changedWords > maxAllowed {
-            throw EditValidationError.excessiveChanges(
-                changedWords: changedWords,
-                totalWords: totalWords,
-                maxAllowed: maxAllowed
-            )
-        }
-
         var result = ""
         result.reserveCapacity(text.count)
         var cursor = text.startIndex
@@ -108,6 +110,19 @@ public enum CorrectionEditValidator {
             cursor = range.upperBound
         }
         result.append(contentsOf: text[cursor..<text.endIndex])
+
+        let expectedGraphemes = text.count + matched.reduce(0) {
+            $0 + $1.edit.replacement.count - text[$1.range].count
+        }
+        guard result.count == expectedGraphemes else {
+            throw EditValidationError.invalidWhitespaceOrControlCharacters
+        }
+        let changedWords = changedWordCount(from: text, to: result)
+        if changedWords > maxAllowed {
+            throw EditValidationError.excessiveChanges(
+                changedWords: changedWords, totalWords: totalWords, maxAllowed: maxAllowed
+            )
+        }
 
         if result.count > text.count * 2 + 16
             || result.unicodeScalars.count > text.unicodeScalars.count * 2 + 32 {
@@ -119,18 +134,11 @@ public enum CorrectionEditValidator {
 
     static func changedWordCount(from original: String, to replacement: String) -> Int {
         guard original != replacement else { return 0 }
-        var orig = wordTokens(in: original)
-        var repl = wordTokens(in: replacement)
-
-        while let a = orig.first, let b = repl.first, a == b {
-            orig.removeFirst()
-            repl.removeFirst()
-        }
-        while let a = orig.last, let b = repl.last, a == b {
-            orig.removeLast()
-            repl.removeLast()
-        }
-        return max(1, max(orig.count, repl.count))
+        let originalWords = wordTokens(in: original)
+        let replacementWords = wordTokens(in: replacement)
+        // Diff the complete transcript so removing punctuation cannot hide merged neighbours.
+        let difference = replacementWords.difference(from: originalWords)
+        return max(1, max(difference.removals.count, difference.insertions.count))
     }
 
     static func wordTokens(in text: String) -> [String] {
@@ -237,6 +245,12 @@ public enum CorrectionEditValidator {
             return matchRange
         }
         return matchCharBoundaries[lowerOffset]..<matchCharBoundaries[upperOffset]
+    }
+
+    private static func isInvisible(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.properties.generalCategory == .format
+            || scalar.properties.isDefaultIgnorableCodePoint
+            || (scalar.properties.isWhitespace && scalar != " ")
     }
 
     private static func controlOrNewlineScalars(in text: String) -> [Unicode.Scalar] {
