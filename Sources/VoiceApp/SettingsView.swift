@@ -55,13 +55,13 @@ struct SettingsView: View {
                 Picker("Push to talk — hold key", selection: $pushToTalkModifier) {
                     ForEach(ModifierKey.allCases) { Text($0.title).tag($0.rawValue) }
                 }
-                KeyboardShortcuts.Recorder("Push to talk — key combo", name: .pushToTalk)
+                ValidatedShortcutRecorder("Push to talk — key combo", name: .pushToTalk)
                 Picker("Toggle to talk — tap key", selection: $toggleModifier) {
                     ForEach(ModifierKey.allCases) { Text($0.title).tag($0.rawValue) }
                 }
-                KeyboardShortcuts.Recorder("Toggle to talk — key combo", name: .toggleToTalk)
-                KeyboardShortcuts.Recorder("Note — push to talk", name: .notePushToTalk)
-                KeyboardShortcuts.Recorder("Note — toggle", name: .noteToggle)
+                ValidatedShortcutRecorder("Toggle to talk — key combo", name: .toggleToTalk)
+                ValidatedShortcutRecorder("Note — push to talk", name: .notePushToTalk)
+                ValidatedShortcutRecorder("Note — toggle", name: .noteToggle)
                 Text("Note shortcuts start unbound. Notes are always saved locally and never pasted.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
@@ -136,6 +136,32 @@ struct SettingsView: View {
         .tint(Theme.neon)
         .preferredColorScheme(.dark)
         .frame(width: 540, height: 640)
+    }
+}
+
+/// The recorder persists before calling onChange; restore the last accepted value on conflict.
+private struct ValidatedShortcutRecorder: View {
+    private static let names: [KeyboardShortcuts.Name] = [.pushToTalk, .toggleToTalk, .notePushToTalk, .noteToggle]
+    let title: String
+    let name: KeyboardShortcuts.Name
+    @State private var accepted: KeyboardShortcuts.Shortcut?
+    @State private var message: String?
+
+    init(_ title: String, name: KeyboardShortcuts.Name) {
+        self.title = title
+        self.name = name
+        _accepted = State(initialValue: KeyboardShortcuts.getShortcut(for: name))
+    }
+
+    var body: some View {
+        KeyboardShortcuts.Recorder(title, name: name) { candidate in
+            let result = ShortcutValidation.resolve(candidate: candidate, previous: accepted,
+                others: Self.names.filter { $0 != name }.map { KeyboardShortcuts.getShortcut(for: $0) })
+            message = result.message
+            accepted = result.value
+            if result.message != nil { KeyboardShortcuts.setShortcut(result.value, for: name) }
+        }
+        if let message { Text(message).font(.callout).foregroundStyle(Theme.warning) }
     }
 }
 

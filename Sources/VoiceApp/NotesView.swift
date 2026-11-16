@@ -26,9 +26,11 @@ struct NotesView: View {
                     .textSelection(.enabled)
             }
             Toggle("Only notes with reminders", isOn: $history.remindersOnly)
-            if history.reminderAccessDenied {
-                Text("Notifications are off for VoiceApp. Reminders stay in Notes and show as overdue when due. Enable VoiceApp in System Settings → Notifications.")
+            if let disclosure = history.reminderAuthorization.disclosure {
+                Text(disclosure + " Reminders stay in Notes and show as overdue when due.")
                     .foregroundStyle(Theme.warning)
+            }
+            if history.reminderAccessDenied {
                 Button("Open VoiceApp Notification Settings") {
                     let bundleID = Bundle.main.bundleIdentifier ?? "com.local.voiceapp"
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)")!)
@@ -37,8 +39,8 @@ struct NotesView: View {
             if let error = history.notificationError {
                 Text(error).foregroundStyle(Theme.warning)
             }
-            if history.reminderAccessDenied || history.notificationError != nil {
-                Button("Refresh notifications") { Task { await history.reconcileReminders().value } }
+            if history.reminderAuthorization != .authorized || history.notificationError != nil {
+                Button("Refresh notifications") { Task { await history.reconcileReminders(requestAuthorization: true).value } }
             }
             ScrollViewReader { proxy in
                 List(selection: $history.focusedNoteID) {

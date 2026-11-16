@@ -58,11 +58,13 @@ Everything runs on-device. No accounts, no cloud.
   **Delete all…** removes saved or queued dictations before confirmation, irrespective of search or
   pagination. Later deliveries survive. Deletes join the save queue and run off the main thread with
   busy/error states. Application termination, including menu Quit, logout, and updater relaunch, waits
-  for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While waiting,
+  for an in-flight transcription, its save, and queued saves/deletes within one 30-second deadline,
+  then proceeds even if work remains. While waiting,
   the menu shows that it is finishing history work, disables Quit, and ignores a second menu Quit request.
   A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
   that fails during the wait cancels quitting and brings History forward with the error. Dictation and paste
-  remain responsive during the wait and after cancellation. Force quit, crashes, and forced shutdown
+  remain responsive after cancellation. While quitting, new recordings are ignored and paste may be
+  skipped, but the completed dictation still joins the save queue. Force quit, crashes, and forced shutdown
   cannot wait. Copy is supported; re-paste is outside this slice.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
@@ -197,6 +199,8 @@ against these contracts exactly.
 ## Voice notes and manual reminders (Part of #3)
 
 - Separate configurable `notePushToTalk` and `noteToggle` key combinations start unbound.
+  Settings rejects a key combination assigned to any other recording action in either direction,
+  shows a plain message, and restores the previous value.
   A recording retains its destination until transcription finishes; other shortcuts cannot end it.
   Notes record the app active at recording start and never call text insertion or mutate the clipboard.
   Transcripts go through `DictationDelivery` filtering and dictionary correction before note delivery,
@@ -214,14 +218,27 @@ against these contracts exactly.
   no other app receives them. No external-app integration or automatic date detection is included.
 - `NoteReminderScheduler` uses a `NoteNotificationCenter` protocol. Notification IDs derive from
   note UUIDs; future requests replace rather than accumulate. Authorization is requested only when
-  setting a reminder, never at launch. Denial keeps the due date and exposes notification settings.
-- Launch reconciliation removes orphan requests, reschedules future reminders, and posts an immediate
-  notification for overdue notes without a `reminderNotifiedAt` timestamp. It records catch-up delivery
-  in the store to suppress repeat launches; already-delivered notifications are not alerted again.
+  setting a reminder or explicitly refreshing unasked authorization, never at launch or on time-zone
+  changes. The window distinguishes not asked yet from turned off. Denial keeps the due date and
+  exposes notification settings.
+- `notes.reminderHandoff` adds `noteState.reminderScheduledFor`. A successful future request records
+  its exact due date; replacing/removing a reminder, marking done, or withdrawing it beyond the cap
+  resets this evidence. A due reminder handed to macOS counts as delivered even if the app was closed
+  and its notification was clicked, closed, or cleared. Present/click handlers persist `reminderNotifiedAt`.
+- Launch reconciliation removes orphan requests, schedules only the nearest 60 future reminders,
+  and acknowledges due handoffs. Only never scheduled overdue reminders receive catch-up alerts;
+  several produce one summary (for example, "3 reminders were due while VoiceApp was closed").
+  Successful catch-up persists each note's alerted timestamp to suppress repeat launches.
+- All reminders remain in Notes beyond the scheduling cap. Launch, changes, and delivery refill slots.
+  Requests use non-repeating calendar-date triggers built from the due date in the current time zone;
+  the second repeated DST hour uses its matching UTC offset to preserve the chosen instant.
+  `NSSystemTimeZoneDidChange` reschedules without asking for authorization.
 - Notes show due/overdue state live and support a reminder-only filter. Notification clicks clear
   search/filter state, load the target even outside the first page, and select/reveal it in Notes.
 - Edits replace pending notification text. Remove reminder, done, and delete cancel pending and
   delivered notifications. Marking done also clears the stored reminder; marking undone does not restore it.
 - Store writes precede notification effects. Notification failure leaves the reminder in Notes with
-  retry advice. Launch repairs interrupted scheduling; a crash between catch-up notification and its
+  retry advice. Launch repairs interrupted scheduling; a crash between notification handoff and its
   timestamp commit can repeat an alert. OS notification settings and Focus can suppress visible alerts.
+  The first authorization dialog currently holds the ordered store queue until answered; paste does
+  not wait for this queue. This is a known tradeoff.

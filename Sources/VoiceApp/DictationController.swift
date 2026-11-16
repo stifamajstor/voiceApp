@@ -37,7 +37,8 @@ final class DictationController: ObservableObject {
     private var isRequestingMicrophone = false
     private var errorClearTask: Task<Void, Never>?
     private var maxDurationTask: Task<Void, Never>?
-    private var transcriptionTask: Task<Void, Never>?
+    private(set) var transcriptionTask: Task<Void, Never>?
+    var isQuitting = false
     private var promptedAccessibilityThisLaunch = false
 
     init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary) {
@@ -112,7 +113,7 @@ final class DictationController: ObservableObject {
         case .idle, .error: break
         case .recording, .transcribing: return
         }
-        guard !isRequestingMicrophone else { return }
+        guard !isQuitting, !isRequestingMicrophone else { return }
 
         guard modelManager.isReady else {
             showError("No model ready — pick and download one in Settings")
@@ -185,6 +186,7 @@ final class DictationController: ObservableObject {
 
         state = .transcribing
         transcriptionTask = Task { [weak self] in
+            defer { self?.transcriptionTask = nil }
             await self?.transcribeAndInsert(samples, destination: destination)
         }
     }
@@ -212,6 +214,7 @@ final class DictationController: ObservableObject {
                 durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate,
                 destination: destination
             ) { text in
+                guard !self.isQuitting else { return }
                 try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
             }
             if delivered {

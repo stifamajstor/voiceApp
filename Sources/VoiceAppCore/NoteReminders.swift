@@ -3,13 +3,24 @@ import UserNotifications
 
 public enum NoteNotificationAuthorization: Sendable {
     case notDetermined, denied, authorized
+
+    public var disclosure: String? {
+        switch self {
+        case .notDetermined:
+            return "Notification permission has not been asked yet. Refresh notifications to allow VoiceApp reminders."
+        case .denied:
+            return "Notifications are turned off for VoiceApp. Enable VoiceApp in System Settings → Notifications."
+        case .authorized: return nil
+        }
+    }
 }
 
 public struct NoteNotification: Equatable, Sendable {
-    public let noteID: UUID
+    public let noteID: UUID?
     public let text: String
     public let date: Date?
-    public var identifier: String { Self.identifier(for: noteID) }
+    public var identifier: String { noteID.map(Self.identifier(for:)) ?? Self.summaryIdentifier }
+    public static let summaryIdentifier = "voice-note-summary"
 
     public static func identifier(for id: UUID) -> String { "voice-note.\(id.uuidString)" }
     public static func noteID(for identifier: String) -> UUID? {
@@ -55,14 +66,29 @@ public final class SystemNoteNotificationCenter: NoteNotificationCenter {
     }
 
     public func add(_ notification: NoteNotification) async throws {
+        try await center.add(Self.request(for: notification))
+    }
+
+    public static func request(for notification: NoteNotification, timeZone: TimeZone = .current) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = "VoiceApp reminder"
         content.body = notification.text
         content.sound = .default
-        let trigger = notification.date.map {
-            UNTimeIntervalNotificationTrigger(timeInterval: max(1, $0.timeIntervalSinceNow), repeats: false)
+        let trigger = notification.date.map { Self.calendarTrigger(for: $0, timeZone: timeZone) }
+        return UNNotificationRequest(identifier: notification.identifier, content: content, trigger: trigger)
+    }
+
+    /// Use local calendar components, disambiguating the second occurrence of a repeated hour.
+    public static func calendarTrigger(for date: Date, timeZone: TimeZone = .current) -> UNCalendarNotificationTrigger {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        components.timeZone = timeZone
+        if let reconstructed = calendar.date(from: components), abs(reconstructed.timeIntervalSince(date)) >= 1 {
+            // Calendar triggers choose the first repeated hour. Its UTC offset distinguishes the second.
+            components.timeZone = TimeZone(secondsFromGMT: timeZone.secondsFromGMT(for: date))
         }
-        try await center.add(UNNotificationRequest(identifier: notification.identifier, content: content, trigger: trigger))
+        return UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
     }
 
     public func remove(identifiers: Set<String>) {
@@ -73,16 +99,17 @@ public final class SystemNoteNotificationCenter: NoteNotificationCenter {
 
 @MainActor
 public final class NoteReminderScheduler {
+    public static let pendingLimit = 60
     private let center: any NoteNotificationCenter
 
     public init(center: any NoteNotificationCenter) { self.center = center }
 
-    public func authorization(requestIfNeeded: Bool) async throws -> Bool {
-        switch await center.authorization() {
-        case .authorized: return true
-        case .notDetermined where requestIfNeeded: return try await center.requestAuthorization()
-        default: return false
+    public func authorization(requestIfNeeded: Bool) async throws -> NoteNotificationAuthorization {
+        let status = await center.authorization()
+        if status == .notDetermined, requestIfNeeded {
+            return try await center.requestAuthorization() ? .authorized : .denied
         }
+        return status
     }
 
     public func remove(id: UUID) { center.remove(identifiers: [NoteNotification.identifier(for: id)]) }
@@ -95,18 +122,44 @@ public final class NoteReminderScheduler {
         center.remove(identifiers: Set(owned).subtracting(active))
     }
 
-    /// Returns true once an overdue reminder has been delivered or found in Notification Center.
-    public func schedule(_ note: VoiceNote, now: Date, catchUp: Bool) async throws -> Bool {
-        guard !note.isDone, let date = note.reminderDate else { remove(id: note.id); return false }
-        if date > now {
-            try await center.add(NoteNotification(noteID: note.id, text: note.text, date: date))
-            return false
+    /// Reconcile as a batch so missed reminders produce at most one catch-up alert.
+    public func reconcile(notes: [VoiceNote], now: Date, catchUp: Bool,
+                          didSchedule: (UUID, Date?) async throws -> Void,
+                          didAlert: (UUID) async throws -> Void) async throws {
+        await removeOrphans(notes: notes)
+        var firstError: (any Error)?
+        let future = notes.filter { !$0.isDone && $0.reminderDate.map({ $0 > now }) == true }.sorted {
+            if $0.reminderDate == $1.reminderDate { return $0.id.uuidString < $1.id.uuidString }
+            return $0.reminderDate! < $1.reminderDate!
         }
-        guard catchUp, note.reminderNotifiedAt == nil else { return false }
-        let identifier = NoteNotification.identifier(for: note.id)
-        if !(await center.deliveredIdentifiers()).contains(identifier) {
-            try await center.add(NoteNotification(noteID: note.id, text: note.text, date: nil))
+        let scheduled = Array(future.prefix(Self.pendingLimit))
+        let deferred = Array(future.dropFirst(Self.pendingLimit))
+        center.remove(identifiers: Set(deferred.map { NoteNotification.identifier(for: $0.id) }))
+        for note in deferred where note.reminderScheduledFor != nil {
+            try await didSchedule(note.id, nil)
         }
-        return true
+        for note in scheduled {
+            do {
+                try await center.add(NoteNotification(noteID: note.id, text: note.text, date: note.reminderDate))
+                try await didSchedule(note.id, note.reminderDate)
+            } catch { firstError = firstError ?? error }
+        }
+        if catchUp {
+            let due = notes.filter { !$0.isDone && $0.reminderDate.map({ $0 <= now }) == true && $0.reminderNotifiedAt == nil }
+            let delivered = await center.deliveredIdentifiers()
+            let missed = due.filter {
+                $0.reminderScheduledFor != $0.reminderDate && !delivered.contains(NoteNotification.identifier(for: $0.id))
+            }
+            do {
+                if missed.count > 1 {
+                    try await center.add(NoteNotification(noteID: nil,
+                        text: "\(missed.count) reminders were due while VoiceApp was closed", date: nil))
+                } else if let note = missed.first {
+                    try await center.add(NoteNotification(noteID: note.id, text: note.text, date: nil))
+                }
+                for note in due { try await didAlert(note.id) }
+            } catch { firstError = firstError ?? error }
+        }
+        if let firstError { throw firstError }
     }
 }

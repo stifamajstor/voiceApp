@@ -167,7 +167,7 @@ final class VoiceNotesTests: XCTestCase {
                 BEGIN INSERT INTO noteState (recordID, text) VALUES (NEW.id, NEW.finalText); END;
                 CREATE TRIGGER notes_delete AFTER UPDATE ON records WHEN NEW.deletedAt IS NOT NULL
                 BEGIN DELETE FROM noteState WHERE recordID = NEW.id; END;
-                DELETE FROM grdb_migrations WHERE identifier = 'notes.localReminders';
+                DELETE FROM grdb_migrations WHERE identifier IN ('notes.localReminders', 'notes.reminderHandoff');
                 """)
             try db.create(virtualTable: "notesFTS", using: FTS5()) { table in
                 table.synchronize(withTable: "noteState")
@@ -288,6 +288,125 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertEqual(fake.accessRequests, 1)
     }
 
+    func testFiredClickedReminderDoesNotAlertOnRelaunch() async throws {
+        try await assertScheduledReminderDoesNotRepeat(clickLaunchesApp: false)
+    }
+
+    func testClosedAcrossDueTimeClickColdLaunchDoesNotAlertAgain() async throws {
+        try await assertScheduledReminderDoesNotRepeat(clickLaunchesApp: true)
+    }
+
+    private func assertScheduledReminderDoesNotRepeat(clickLaunchesApp: Bool) async throws {
+        let fake = FakeNotifications()
+        let clock = Date(timeIntervalSince1970: 1_900_000_000)
+        var history: DictationHistory? = makeHistory(notifications: fake, now: { clock })
+        let note = sample("buy milk")
+        await history!.deliver(note, destination: .note) { _ in XCTFail("Notes never paste") }
+        await history!.pendingSave?.value
+        await history!.remindNote(id: note.id, date: clock.addingTimeInterval(600)).value
+        let id = NoteNotification.identifier(for: note.id)
+        XCTAssertNotNil(fake.pending[id])
+        if clickLaunchesApp { history = nil }
+        // macOS fires the request, then a click or Clear All removes its delivered entry.
+        fake.pending[id] = nil
+        fake.delivered.insert(id)
+        fake.delivered.remove(id)
+        history = nil
+        fake.added = []
+        let relaunched = makeHistory(notifications: fake, now: { clock.addingTimeInterval(3600) })
+        await relaunched.start().value
+        XCTAssertTrue(fake.added.isEmpty, "A successful OS handoff must suppress catch-up after click/clear")
+        let twice = makeHistory(notifications: fake, now: { clock.addingTimeInterval(7200) })
+        await twice.start().value
+        XCTAssertTrue(fake.added.isEmpty)
+    }
+
+    func testHundredRemindersScheduleNearestSixtyAndTopUpAfterFireAndChanges() async throws {
+        var clock = Date(timeIntervalSince1970: 1_900_000_000)
+        let initial = clock
+        let store = try MemoryStore(directory: directory)
+        var ids: [UUID] = []
+        for index in 0..<100 {
+            let note = try store.append(kind: .note, rawText: "reminder \(index)")
+            ids.append(note.id)
+            try store.setNoteReminder(id: note.id, date: initial.addingTimeInterval(Double(index + 1) * 60))
+        }
+        try store.close()
+        let fake = FakeNotifications()
+        let history = makeHistory(notifications: fake, now: { clock })
+        await history.start().value
+        await history.refreshNotes()
+        XCTAssertEqual(history.notes.count, 100, "Capped reminders remain in Notes")
+        func pendingIDs(_ range: Range<Int>) -> Set<String> {
+            Set(range.map { NoteNotification.identifier(for: ids[$0]) })
+        }
+        XCTAssertEqual(Set(fake.pending.keys), pendingIDs(0..<60))
+        XCTAssertEqual(history.notes.filter { $0.reminderScheduledFor != nil }.count, 60)
+        let fired = NoteNotification.identifier(for: ids[0])
+        clock = initial.addingTimeInterval(60)
+        fake.pending[fired] = nil
+        fake.delivered.insert(fired)
+        await history.reminderDidAlert(id: ids[0]).value
+        XCTAssertEqual(Set(fake.pending.keys), pendingIDs(1..<61))
+        await history.removeNoteReminder(id: ids[1]).value
+        XCTAssertEqual(Set(fake.pending.keys), pendingIDs(2..<62))
+        await history.setNoteDone(id: ids[2], isDone: true).value
+        XCTAssertEqual(Set(fake.pending.keys), pendingIDs(3..<63))
+        history.requestDeleteNote(try XCTUnwrap(history.notes.first { $0.id == ids[3] }))
+        await history.confirmDeleteNote()?.value
+        XCTAssertEqual(Set(fake.pending.keys), pendingIDs(4..<64))
+        // Move a previously scheduled reminder outside the cap: cancel its handoff too.
+        await history.remindNote(id: ids[4], date: initial.addingTimeInterval(100_000)).value
+        XCTAssertEqual(Set(fake.pending.keys), pendingIDs(5..<65))
+        XCTAssertNil(history.notes.first { $0.id == ids[4] }?.reminderScheduledFor)
+        XCTAssertNotNil(history.notes.first { $0.id == ids[0] }?.reminderNotifiedAt)
+    }
+
+    func testOnlyNeverHandedOffRemindersBeyondCapCatchUpAfterClosedDelivery() async throws {
+        let initial = Date(timeIntervalSince1970: 1_900_000_000)
+        let store = try MemoryStore(directory: directory)
+        for index in 0..<100 {
+            let note = try store.append(kind: .note, rawText: "reminder \(index)")
+            try store.setNoteReminder(id: note.id, date: initial.addingTimeInterval(Double(index + 1)))
+        }
+        try store.close()
+        let fake = FakeNotifications()
+        let history = makeHistory(notifications: fake, now: { initial })
+        await history.start().value
+        XCTAssertEqual(fake.pending.count, 60)
+        fake.pending = [:] // OS delivered all scheduled requests while the app was closed; user cleared them.
+        fake.added = []
+        let relaunched = makeHistory(notifications: fake, now: { initial.addingTimeInterval(200) })
+        await relaunched.start().value
+        XCTAssertEqual(fake.added.count, 1)
+        XCTAssertEqual(fake.added.first?.text, "40 reminders were due while VoiceApp was closed")
+        await relaunched.refreshNotes()
+        XCTAssertTrue(relaunched.notes.allSatisfy { $0.reminderNotifiedAt != nil })
+    }
+
+    func testThreeNeverScheduledOverdueRemindersProduceOneSummaryOnlyOnce() async throws {
+        let clock = Date(timeIntervalSince1970: 1_900_000_000)
+        let store = try MemoryStore(directory: directory)
+        for text in ["first", "second", "third"] {
+            let note = try store.append(kind: .note, rawText: text)
+            try store.setNoteReminder(id: note.id, date: clock.addingTimeInterval(-60))
+        }
+        try store.close()
+        let fake = FakeNotifications()
+        let history = makeHistory(notifications: fake, now: { clock })
+        await history.start().value
+        XCTAssertEqual(fake.added.count, 1)
+        XCTAssertEqual(fake.added.first?.text, "3 reminders were due while VoiceApp was closed")
+        let reopened = try MemoryStore(directory: directory)
+        XCTAssertTrue(try reopened.notes().allSatisfy { $0.reminderNotifiedAt != nil })
+        try reopened.close()
+        fake.added = []
+        fake.delivered = []
+        let twice = makeHistory(notifications: fake, now: { clock })
+        await twice.start().value
+        XCTAssertTrue(fake.added.isEmpty)
+    }
+
     func testLaunchReschedulesFutureRemindersAndCatchesUpOverdueOnlyOnce() async throws {
         let fake = FakeNotifications()
         let clock = Date(timeIntervalSince1970: 1_900_000_000)
@@ -298,7 +417,9 @@ final class VoiceNotesTests: XCTestCase {
         await history.deliver(overdue, destination: .note) { _ in XCTFail() }
         await history.pendingSave?.value
         await history.remindNote(id: future.id, date: clock.addingTimeInterval(3600)).value
+        fake.failAdd = true
         await history.remindNote(id: overdue.id, date: clock.addingTimeInterval(60)).value
+        fake.failAdd = false
         fake.pending = [:]
         fake.added = []
         let orphan = UUID()
@@ -346,6 +467,30 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertFalse(relaunched.reminderAccessDenied)
         await relaunched.removeNoteReminder(id: note.id).value
         XCTAssertFalse(fake.delivered.contains(identifier))
+    }
+
+    func testRefreshRequestsUnaskedPermissionButLaunchAndDeniedRefreshNeverPrompt() async throws {
+        let clock = Date(timeIntervalSince1970: 1_900_000_000)
+        let store = try MemoryStore(directory: directory)
+        let note = try store.append(kind: .note, rawText: "allow notifications")
+        try store.setNoteReminder(id: note.id, date: clock.addingTimeInterval(3600))
+        try store.close()
+        let fake = FakeNotifications()
+        fake.status = .notDetermined
+        let history = makeHistory(notifications: fake, now: { clock })
+        await history.start().value
+        XCTAssertEqual(fake.accessRequests, 0)
+        XCTAssertEqual(history.reminderAuthorization, .notDetermined)
+        XCTAssertTrue(history.reminderAuthorization.disclosure?.contains("not been asked yet") == true)
+        await history.reconcileReminders(requestAuthorization: true).value
+        XCTAssertEqual(fake.accessRequests, 1)
+        XCTAssertEqual(fake.pending.count, 1)
+        XCTAssertNil(history.reminderAuthorization.disclosure)
+        fake.status = .denied
+        await history.reconcileReminders(requestAuthorization: true).value
+        XCTAssertEqual(fake.accessRequests, 1)
+        XCTAssertTrue(history.reminderAccessDenied)
+        XCTAssertTrue(history.reminderAuthorization.disclosure?.contains("turned off") == true)
     }
 
     func testNotificationFailureKeepsSavedReminderAndRetryRepairsIt() async throws {
@@ -521,6 +666,7 @@ final class FakeNotifications: NoteNotificationCenter {
     var pending: [String: NoteNotification] = [:]
     var delivered: Set<String> = []
     var added: [NoteNotification] = []
+    var onAdd: ((NoteNotification) -> Void)?
 
     func authorization() async -> NoteNotificationAuthorization { status }
     func requestAuthorization() async throws -> Bool {
@@ -533,6 +679,7 @@ final class FakeNotifications: NoteNotificationCenter {
     func add(_ notification: NoteNotification) async throws {
         if failAdd { throw CocoaError(.fileWriteNoPermission) }
         added.append(notification)
+        onAdd?(notification)
         if notification.date != nil { pending[notification.identifier] = notification }
         else { pending[notification.identifier] = nil; delivered.insert(notification.identifier) }
     }
@@ -573,11 +720,21 @@ private actor GatedNotesRepository: HistoryRepository {
     }
     func editNote(id: UUID, text: String) async throws { try await repository.editNote(id: id, text: text) }
     func setNoteDone(id: UUID, isDone: Bool) async throws { try await repository.setNoteDone(id: id, isDone: isDone) }
+    func markNoteReminderScheduled(id: UUID, for date: Date?) async throws {
+        try await repository.markNoteReminderScheduled(id: id, for: date)
+    }
     func markNoteReminderNotified(id: UUID, at date: Date) async throws {
         try await repository.markNoteReminderNotified(id: id, at: date)
     }
     func setNoteReminder(id: UUID, date: Date?) async throws {
         if failReminderLink { throw CocoaError(.fileWriteNoPermission) }
         try await repository.setNoteReminder(id: id, date: date)
+    }
+}
+
+// History-only doubles must fail if a test accidentally attempts notification persistence.
+extension HistoryRepository {
+    func markNoteReminderScheduled(id: UUID, for date: Date?) async throws {
+        throw CocoaError(.featureUnsupported)
     }
 }

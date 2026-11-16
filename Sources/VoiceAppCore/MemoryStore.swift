@@ -166,7 +166,7 @@ public final class MemoryStore: Sendable {
             if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && tokens.isEmpty { return [] }
             let rows = try Row.fetchAll(db, sql: """
                 SELECT records.*, noteState.text AS noteText, noteState.isDone,
-                    noteState.reminderNotifiedAt, noteState.reminderDate
+                    noteState.reminderNotifiedAt, noteState.reminderDate, noteState.reminderScheduledFor
                 FROM records JOIN noteState ON noteState.recordID = records.id
                 WHERE records.deletedAt IS NULL AND records.kind = 'note'
                     AND (? IS NULL OR records.id = ?)
@@ -178,7 +178,8 @@ public final class MemoryStore: Sendable {
             return try rows.map { row in
                 VoiceNote(record: try MemoryRecord(row: row), text: row["noteText"], isDone: row["isDone"],
                     reminderDate: (row["reminderDate"] as Double?).map(Date.init(timeIntervalSince1970:)),
-                    reminderNotifiedAt: (row["reminderNotifiedAt"] as Double?).map(Date.init(timeIntervalSince1970:)))
+                    reminderNotifiedAt: (row["reminderNotifiedAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                    reminderScheduledFor: (row["reminderScheduledFor"] as Double?).map(Date.init(timeIntervalSince1970:)))
             }
         }
     }
@@ -192,12 +193,18 @@ public final class MemoryStore: Sendable {
         try updateNote(id: id, sql: """
             UPDATE noteState SET isDone = ?,
                 reminderDate = CASE WHEN ? THEN NULL ELSE reminderDate END,
-                reminderNotifiedAt = CASE WHEN ? THEN NULL ELSE reminderNotifiedAt END WHERE recordID = ?
-            """, values: [isDone, isDone, isDone])
+                reminderNotifiedAt = CASE WHEN ? THEN NULL ELSE reminderNotifiedAt END,
+                reminderScheduledFor = CASE WHEN ? THEN NULL ELSE reminderScheduledFor END WHERE recordID = ?
+            """, values: [isDone, isDone, isDone, isDone])
     }
 
     public func setNoteReminder(id: UUID, date: Date?) throws {
-        try updateNote(id: id, sql: "UPDATE noteState SET reminderDate = ?, reminderNotifiedAt = NULL WHERE recordID = ?",
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderDate = ?, reminderNotifiedAt = NULL, reminderScheduledFor = NULL WHERE recordID = ?",
+                       values: [date?.timeIntervalSince1970])
+    }
+
+    public func markNoteReminderScheduled(id: UUID, for date: Date?) throws {
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderScheduledFor = ? WHERE recordID = ?",
                        values: [date?.timeIntervalSince1970])
     }
 
@@ -515,6 +522,9 @@ public final class MemoryStore: Sendable {
                 table.tokenizer = .unicode61()
                 table.column("text")
             }
+        }
+        migrator.registerMigration("notes.reminderHandoff") { db in
+            try db.execute(sql: "ALTER TABLE noteState ADD COLUMN reminderScheduledFor REAL")
         }
         return migrator
     }

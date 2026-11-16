@@ -30,12 +30,16 @@ struct VoiceApp: App {
         _notesWindow = StateObject(wrappedValue: notesWindow)
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        let termination = HistoryTermination(history: history, showHistory: {
+        let termination = HistoryTermination(history: history,
+            pendingTranscription: { dictation.transcriptionTask },
+            prepareToQuit: { dictation.isQuitting = true },
+            quitCancelled: { dictation.isQuitting = false }, showHistory: {
             if history.noteDeleteError != nil { notesWindow.show() } else { historyWindow.show() }
         })
         _termination = StateObject(wrappedValue: termination)
         appDelegate.termination = termination
         appDelegate.notesWindow = notesWindow
+        appDelegate.history = history
         UNUserNotificationCenter.current().delegate = appDelegate
         history.start()
         dictionary.start()
@@ -120,15 +124,23 @@ struct MenuBarIcon: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     var notesWindow: NotesWindowController?
+    var history: DictationHistory?
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
-              let id = NoteNotification.noteID(for: response.notification.request.identifier) else { return }
-        await MainActor.run { self.notesWindow?.reveal(noteID: id) }
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        if let id = NoteNotification.noteID(for: response.notification.request.identifier) {
+            await history?.reminderDidAlert(id: id).value
+            await MainActor.run { self.notesWindow?.reveal(noteID: id) }
+        } else if response.notification.request.identifier == NoteNotification.summaryIdentifier {
+            await MainActor.run { self.notesWindow?.show() }
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        if let id = NoteNotification.noteID(for: notification.request.identifier) {
+            await history?.reminderDidAlert(id: id).value
+        }
+        return [.banner, .list, .sound]
     }
     var termination: HistoryTermination?
 

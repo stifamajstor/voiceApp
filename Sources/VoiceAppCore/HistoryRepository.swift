@@ -36,6 +36,7 @@ public protocol HistoryRepository: Sendable {
     func editNote(id: UUID, text: String) async throws
     func setNoteDone(id: UUID, isDone: Bool) async throws
     func setNoteReminder(id: UUID, date: Date?) async throws
+    func markNoteReminderScheduled(id: UUID, for date: Date?) async throws
     func markNoteReminderNotified(id: UUID, at date: Date) async throws
 }
 
@@ -133,6 +134,10 @@ public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
     public func setNoteDone(id: UUID, isDone: Bool) async throws { try availableStore().setNoteDone(id: id, isDone: isDone) }
     public func setNoteReminder(id: UUID, date: Date?) async throws {
         try availableStore().setNoteReminder(id: id, date: date)
+    }
+
+    public func markNoteReminderScheduled(id: UUID, for date: Date?) async throws {
+        try availableStore().markNoteReminderScheduled(id: id, for: date)
     }
 
     public func markNoteReminderNotified(id: UUID, at date: Date) async throws {

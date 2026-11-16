@@ -66,7 +66,7 @@ The first model load can take longer while Core ML prepares it for your Mac. If 
 | Note — push to talk, key combination | None | Hold to record a note; release to save without pasting |
 | Note — toggle, key combination | None | Press to start a note; press again to save without pasting |
 
-Both the key combinations and modifier keys are configurable in Settings. If ⌥Space conflicts with a launcher, record another combination. Key combinations work without Accessibility permission; single modifier keys require it when used outside VoiceApp.
+Both the key combinations and modifier keys are configurable in Settings. A key combination already assigned to another recording action is rejected with a message and the previous value is kept. If ⌥Space conflicts with a launcher, record another combination. Key combinations work without Accessibility permission; single modifier keys require it when used outside VoiceApp.
 
 Modifier push-to-talk has a short hold delay. Combining that modifier with another key cancels the recording so ordinary Option-character typing does not produce a transcript. If both modifier actions use the same key, push-to-talk takes precedence.
 
@@ -125,11 +125,13 @@ Every deletion asks for confirmation with the number of dictations to remove and
 dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
 Search and deletion run in the background with a busy indicator; large deletes can take seconds.
 Quitting from the menu or through macOS application termination (including logout and updater relaunch)
-waits for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While
+waits for an in-flight transcription and its save, plus queued saves and deletes, within one 30-second
+deadline, then proceeds even if work remains. New recordings are ignored while quitting; dictation paste
+may be skipped, but its history save still runs. While
 waiting, the menu says it is finishing history work, disables Quit, and ignores a second menu Quit request.
 A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
-that fails during the wait cancels quitting and brings History forward with the error; dictation and
-paste keep working meanwhile. Force quit, a crash, or a forced system shutdown cannot wait.
+that fails during the wait cancels quitting and brings History forward with the error; new dictations
+can then run again. Force quit, a crash, or a forced system shutdown cannot wait.
 Copy a transcript and paste it into the intended app yourself.
 
 The menu keeps the latest three transcripts across relaunches when history is enabled. **Clear recent**
@@ -172,17 +174,28 @@ macOS notification. Clicking it opens that note. **Remove reminder**, marking do
 cancel the notification. Editing updates its text. Notes show due/overdue dates and can filter to
 notes with reminders. No dates are detected automatically. Notes and reminders stay inside VoiceApp.
 
-Notification permission is requested only when you first set a reminder. If denied, the reminder
-stays in Notes with a link to VoiceApp's notification settings. After enabling notifications, use
-**Refresh notifications**. Notification previews may show note text according to macOS settings.
+Notification permission is requested when you first set a reminder, or when you choose
+**Refresh notifications** if permission has not been asked yet. Launch never asks. Notes distinguishes
+unasked permission from notifications turned off. If denied, the reminder stays in Notes with a link
+to VoiceApp's notification settings. After enabling notifications, use **Refresh notifications**.
+Notification previews may show note text according to macOS settings.
 
 The original transcript stays immutable. A local `noteState` side table holds current edited text,
-done state, due date, and a catch-up notification timestamp. Note deletion scrubs both the transcript
+done state, due date, successful OS handoff for that due date, and an alerted timestamp. Note deletion
+scrubs both the transcript
 and side state, retaining only the record tombstone. Notes share the history store actor and ordered
 write queue, including quit draining. Future notifications are restored on launch using a stable ID
-per note. Missed reminders stay overdue and get one catch-up notification, recorded to avoid repeats.
+per note, using calendar-date triggers in the current time zone, with repeated DST hours disambiguated.
+Time-zone changes reschedule future requests. Only the nearest 60 future reminders are scheduled;
+all others remain in Notes. Delivery and changes refill available slots. At launch, a due reminder
+successfully handed to macOS is treated as delivered, even after a click or Clear All. Only never
+scheduled reminders get a catch-up alert; multiple missed reminders produce one count summary.
+The alerted timestamp prevents repeated catch-ups; reminders remain overdue until removed or done.
 SQLite and the notification service cannot commit atomically; launch reconciliation repairs pending
-requests after interruption. A crash between catch-up delivery and its timestamp save can repeat an alert.
+requests after interruption. A crash between notification handoff and its timestamp save can repeat
+an alert. Focus and OS settings
+can suppress visible delivery. The first permission dialog currently holds the ordered store queue
+until answered; dictation paste remains independent of that queue.
 
 ## Troubleshooting
 

@@ -5,14 +5,21 @@ import Foundation
 public final class HistoryTermination: ObservableObject {
     @Published public private(set) var isQuitPending = false
     private let history: DictationHistory
+    private let pendingTranscription: () -> Task<Void, Never>?
+    private let quitCancelled: () -> Void
+    private let prepareToQuit: () -> Void
     private let showHistory: () -> Void
     private let waitForDeadline: @Sendable (Duration) async throws -> Void
     private(set) var waiting: Task<Void, Never>?
     private(set) var deadline: Task<Void, Never>?
 
-    public init(history: DictationHistory, showHistory: @escaping () -> Void = {},
+    public init(history: DictationHistory, pendingTranscription: @escaping () -> Task<Void, Never>? = { nil },
+                prepareToQuit: @escaping () -> Void = {}, quitCancelled: @escaping () -> Void = {}, showHistory: @escaping () -> Void = {},
                 waitForDeadline: (@Sendable (Duration) async throws -> Void)? = nil) {
         self.history = history
+        self.pendingTranscription = pendingTranscription
+        self.prepareToQuit = prepareToQuit
+        self.quitCancelled = quitCancelled
         self.showHistory = showHistory
         self.waitForDeadline = waitForDeadline ?? Self.sleepBeforeDeadline
     }
@@ -23,10 +30,13 @@ public final class HistoryTermination: ObservableObject {
 
     public func requestTermination(reply: @escaping (Bool) -> Void) -> Bool {
         guard !isQuitPending else { return false }
-        guard history.pendingSave != nil else { return true }
+        let transcription = pendingTranscription()
+        guard history.pendingSave != nil || transcription != nil else { return true }
+        prepareToQuit()
         isQuitPending = true
         let deleteFailures = history.deleteFailures
         waiting = Task {
+            await transcription?.value
             while let tail = history.pendingSave, !Task.isCancelled {
                 await tail.value
             }
@@ -55,7 +65,7 @@ public final class HistoryTermination: ObservableObject {
         waiting = nil
         deadline = nil
         let mayQuit = history.deleteFailures == deleteFailures
-        if !mayQuit { isQuitPending = false }
+        if !mayQuit { isQuitPending = false; quitCancelled() }
         reply(mayQuit)
         if !mayQuit { showHistory() }
     }
