@@ -28,6 +28,7 @@ final class DictationController: ObservableObject {
 
     private let modelManager: ModelManager
     private let history: DictationHistory
+    private let dictionary: UserDictionary
     private let recorder = AudioRecorder()
     private let hotkeys = HotkeyManager()
     private let modifierHotkeys = ModifierHotkeyMonitor()
@@ -40,9 +41,10 @@ final class DictationController: ObservableObject {
     private var transcriptionTask: Task<Void, Never>?
     private var promptedAccessibilityThisLaunch = false
 
-    init(modelManager: ModelManager, history: DictationHistory) {
+    init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary) {
         self.modelManager = modelManager
         self.history = history
+        self.dictionary = dictionary
         recorder.onInterrupted = { [weak self] in
             // Input device vanished mid-recording: transcribe what we have.
             self?.finishRecording()
@@ -197,8 +199,9 @@ final class DictationController: ObservableObject {
             return
         }
 
+        let correctedText = dictionary.correct(text).text
         let target = NSWorkspace.shared.frontmostApplication
-        let completed = CompletedDictation(rawText: rawText, finalText: text,
+        let completed = CompletedDictation(rawText: rawText, finalText: correctedText,
             appBundleID: target?.bundleIdentifier, appName: target?.localizedName,
             modelID: modelID, durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate)
         do {

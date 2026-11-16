@@ -19,6 +19,17 @@ public struct DictionaryTerm: Identifiable, Codable, Equatable, Sendable {
         self.deletedAt = deletedAt
     }
 
+    static func trimEdgeWhitespace(_ value: String) -> String {
+        var scalars = Substring.UnicodeScalarView(value.unicodeScalars)
+        while let first = scalars.first, first.properties.isWhitespace {
+            scalars.removeFirst()
+        }
+        while let last = scalars.last, last.properties.isWhitespace {
+            scalars.removeLast()
+        }
+        return String(scalars)
+    }
+
     static func matchKey(_ value: String) -> String {
         value.unicodeScalars.split(whereSeparator: { $0.properties.isWhitespace })
             .map { String(String.UnicodeScalarView($0)) }.joined(separator: " ")
@@ -43,8 +54,19 @@ extension DictionaryTerm: FetchableRecord, PersistableRecord {
     }
 }
 
-public enum DictionaryError: Error, Equatable {
+public enum DictionaryError: Error, Equatable, LocalizedError {
     case emptyText
     case conflict(value: String, termID: UUID)
     case termNotFound(UUID)
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyText:
+            return "Term text cannot be blank."
+        case .conflict(let value, _):
+            return "\"\(value)\" is already used by another term or alias."
+        case .termNotFound:
+            return "This term no longer exists."
+        }
+    }
 }

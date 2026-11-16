@@ -185,9 +185,11 @@ public final class MemoryStore: Sendable {
 
     @discardableResult
     public func addTerm(text: String, aliases: [String] = []) throws -> DictionaryTerm {
-        try database.write { db in
-            try Self.validateTerm(text: text, aliases: aliases, excluding: nil, in: db)
-            let term = DictionaryTerm(text: text, aliases: aliases, deviceID: deviceID)
+        let trimmedText = DictionaryTerm.trimEdgeWhitespace(text)
+        let trimmedAliases = Self.normalizedAliases(aliases)
+        return try database.write { db in
+            try Self.validateTerm(text: trimmedText, aliases: trimmedAliases, excluding: nil, in: db)
+            let term = DictionaryTerm(text: trimmedText, aliases: trimmedAliases, deviceID: deviceID)
             try term.insert(db)
             return term
         }
@@ -195,13 +197,15 @@ public final class MemoryStore: Sendable {
 
     @discardableResult
     public func updateTerm(id: UUID, text: String, aliases: [String]) throws -> DictionaryTerm {
-        try database.write { db in
+        let trimmedText = DictionaryTerm.trimEdgeWhitespace(text)
+        let trimmedAliases = Self.normalizedAliases(aliases)
+        return try database.write { db in
             guard var term = try DictionaryTerm.fetchOne(db,
                 sql: "SELECT * FROM dictionaryTerms WHERE id = ? AND deletedAt IS NULL",
                 arguments: [id.uuidString]) else { throw DictionaryError.termNotFound(id) }
-            try Self.validateTerm(text: text, aliases: aliases, excluding: id, in: db)
-            term.text = text
-            term.aliases = aliases
+            try Self.validateTerm(text: trimmedText, aliases: trimmedAliases, excluding: id, in: db)
+            term.text = trimmedText
+            term.aliases = trimmedAliases
             term.updatedAt = Self.nextTermDate(after: term.updatedAt)
             term.deviceID = deviceID
             try term.update(db)
@@ -233,6 +237,13 @@ public final class MemoryStore: Sendable {
     public func dictionaryTerm(id: UUID) throws -> DictionaryTerm? {
         try database.read { db in
             try DictionaryTerm.fetchOne(db, key: id.uuidString)
+        }
+    }
+
+    private static func normalizedAliases(_ aliases: [String]) -> [String] {
+        aliases.compactMap { alias in
+            let trimmed = DictionaryTerm.trimEdgeWhitespace(alias)
+            return trimmed.isEmpty ? nil : trimmed
         }
     }
 

@@ -16,66 +16,7 @@ public struct TextCorrectionResult: Equatable, Sendable {
 
 /// Applies up to eight longest-match passes. A false convergence flag means a pass or growth limit was reached.
 public func correctText(_ text: String, terms: [DictionaryTerm]) -> TextCorrectionResult {
-    guard !text.isEmpty else {
-        return TextCorrectionResult(text: text, replacements: [], converged: true)
-    }
-    let matcher = CorrectionMatcher(terms: terms)
-    let original = text as NSString
-    var output = text
-    var sources = (0..<original.length).map {
-        CorrectionSource(range: NSRange(location: $0, length: 1), termID: nil, generation: 0)
-    }
-    let growthLimit = original.length.addingReportingOverflow(1_048_576)
-    let maximumLength = growthLimit.overflow ? Int.max : growthLimit.partialValue
-    var generation = 0
-    var converged = false
-    for _ in 0..<8 {
-        let edits = matcher.edits(in: output)
-        if edits.isEmpty {
-            converged = true
-            break
-        }
-        var length = sources.count
-        var fits = true
-        for edit in edits {
-            let change = edit.term.text.utf16.count - edit.range.length
-            let next = length.addingReportingOverflow(change)
-            if next.overflow || next.partialValue > maximumLength { fits = false; break }
-            length = next.partialValue
-        }
-        guard fits else { break }
-        let units = Array(output.utf16)
-        var nextUnits: [UInt16] = []
-        var nextSources: [CorrectionSource] = []
-        nextUnits.reserveCapacity(length)
-        nextSources.reserveCapacity(length)
-        var cursor = 0
-        for edit in edits {
-            nextUnits.append(contentsOf: units[cursor..<edit.range.location])
-            nextSources.append(contentsOf: sources[cursor..<edit.range.location])
-            let end = NSMaxRange(edit.range)
-            var sourceRange = sources[edit.range.location].range
-            for source in sources[edit.range.location..<end] {
-                sourceRange = NSUnionRange(sourceRange, source.range)
-            }
-            generation += 1
-            let replacement = Array(edit.term.text.utf16)
-            nextUnits.append(contentsOf: replacement)
-            nextSources.append(contentsOf: repeatElement(
-                CorrectionSource(range: sourceRange, termID: edit.term.id, generation: generation),
-                count: replacement.count))
-            cursor = end
-        }
-        nextUnits.append(contentsOf: units[cursor...])
-        nextSources.append(contentsOf: sources[cursor...])
-        output = String(decoding: nextUnits, as: UTF16.self)
-        sources = nextSources
-    }
-    // The eighth pass may itself reach the fixed point; checking does not apply a ninth pass.
-    if !converged { converged = matcher.edits(in: output).isEmpty }
-    return TextCorrectionResult(text: output,
-        replacements: mergedReplacements(original: original, output: output as NSString, sources: sources),
-        converged: converged)
+    CorrectionMatcher(terms: terms).correct(text)
 }
 
 private struct CorrectionEdit {
@@ -89,20 +30,29 @@ private struct CorrectionSource {
     let generation: Int
 }
 
-private struct CorrectionMatcher {
-    private struct Node {
+/// Prebuilt dictionary matcher that can be reused across dictations until terms change.
+public struct CorrectionMatcher: Sendable {
+    public static let empty = CorrectionMatcher(terms: [])
+
+    private struct Node: Sendable {
         var children: [Unicode.Scalar: Int] = [:]
         var terms: [DictionaryTerm] = []
     }
 
     private var nodes = [Node()]
 
-    init(terms: [DictionaryTerm]) {
+    public init(terms: [DictionaryTerm]) {
         let locale = Locale(identifier: "en_US_POSIX")
-        for term in terms where term.deletedAt == nil && !DictionaryTerm.matchKey(term.text).isEmpty {
+        for term in terms {
+            let trimmedText = DictionaryTerm.trimEdgeWhitespace(term.text)
+            guard term.deletedAt == nil, !trimmedText.isEmpty else { continue }
+            var normalizedTerm = term
+            normalizedTerm.text = trimmedText
             var seen: Set<String> = []
-            for value in [term.text] + term.aliases where !DictionaryTerm.matchKey(value).isEmpty {
-                let folded = value.folding(options: .caseInsensitive, locale: locale)
+            for value in [trimmedText] + term.aliases {
+                let trimmedValue = DictionaryTerm.trimEdgeWhitespace(value)
+                guard !trimmedValue.isEmpty else { continue }
+                let folded = trimmedValue.folding(options: .caseInsensitive, locale: locale)
                     .precomposedStringWithCanonicalMapping
                 var scalars: [Unicode.Scalar] = []
                 for scalar in folded.unicodeScalars {
@@ -112,7 +62,9 @@ private struct CorrectionMatcher {
                         scalars.append(scalar)
                     }
                 }
-                guard seen.insert(String(String.UnicodeScalarView(scalars))).inserted else { continue }
+                while scalars.first == " " { scalars.removeFirst() }
+                while scalars.last == " " { scalars.removeLast() }
+                guard !scalars.isEmpty, seen.insert(String(String.UnicodeScalarView(scalars))).inserted else { continue }
                 var node = 0
                 for scalar in scalars {
                     if let child = nodes[node].children[scalar] {
@@ -124,12 +76,75 @@ private struct CorrectionMatcher {
                         node = child
                     }
                 }
-                nodes[node].terms.append(term)
+                nodes[node].terms.append(normalizedTerm)
             }
         }
     }
 
-    func edits(in text: String) -> [CorrectionEdit] {
+    /// Applies up to eight longest-match passes. A false convergence flag means a pass or growth limit was reached.
+    public func correct(_ text: String) -> TextCorrectionResult {
+        guard !text.isEmpty, !nodes[0].children.isEmpty else {
+            return TextCorrectionResult(text: text, replacements: [], converged: true)
+        }
+        let original = text as NSString
+        var output = text
+        var sources = (0..<original.length).map {
+            CorrectionSource(range: NSRange(location: $0, length: 1), termID: nil, generation: 0)
+        }
+        let growthLimit = original.length.addingReportingOverflow(1_048_576)
+        let maximumLength = growthLimit.overflow ? Int.max : growthLimit.partialValue
+        var generation = 0
+        var converged = false
+        for _ in 0..<8 {
+            let edits = edits(in: output)
+            if edits.isEmpty {
+                converged = true
+                break
+            }
+            var length = sources.count
+            var fits = true
+            for edit in edits {
+                let change = edit.term.text.utf16.count - edit.range.length
+                let next = length.addingReportingOverflow(change)
+                if next.overflow || next.partialValue > maximumLength { fits = false; break }
+                length = next.partialValue
+            }
+            guard fits else { break }
+            let units = Array(output.utf16)
+            var nextUnits: [UInt16] = []
+            var nextSources: [CorrectionSource] = []
+            nextUnits.reserveCapacity(length)
+            nextSources.reserveCapacity(length)
+            var cursor = 0
+            for edit in edits {
+                nextUnits.append(contentsOf: units[cursor..<edit.range.location])
+                nextSources.append(contentsOf: sources[cursor..<edit.range.location])
+                let end = NSMaxRange(edit.range)
+                var sourceRange = sources[edit.range.location].range
+                for source in sources[edit.range.location..<end] {
+                    sourceRange = NSUnionRange(sourceRange, source.range)
+                }
+                generation += 1
+                let replacement = Array(edit.term.text.utf16)
+                nextUnits.append(contentsOf: replacement)
+                nextSources.append(contentsOf: repeatElement(
+                    CorrectionSource(range: sourceRange, termID: edit.term.id, generation: generation),
+                    count: replacement.count))
+                cursor = end
+            }
+            nextUnits.append(contentsOf: units[cursor...])
+            nextSources.append(contentsOf: sources[cursor...])
+            output = String(decoding: nextUnits, as: UTF16.self)
+            sources = nextSources
+        }
+        // The eighth pass may itself reach the fixed point; checking does not apply a ninth pass.
+        if !converged { converged = edits(in: output).isEmpty }
+        return TextCorrectionResult(text: output,
+            replacements: mergedReplacements(original: original, output: output as NSString, sources: sources),
+            converged: converged)
+    }
+
+    private func edits(in text: String) -> [CorrectionEdit] {
         let string = text as NSString
         let boundaries = WordBoundaries(text)
         let units = normalizedUnits(text)

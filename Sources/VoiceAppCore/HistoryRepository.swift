@@ -38,8 +38,16 @@ extension HistoryRepository {
     }
 }
 
+public protocol DictionaryRepository: Sendable {
+    func open() async throws
+    func listTerms() async throws -> [DictionaryTerm]
+    func addTerm(text: String, aliases: [String]) async throws -> DictionaryTerm
+    func updateTerm(id: UUID, text: String, aliases: [String]) async throws -> DictionaryTerm
+    func deleteTerm(id: UUID) async throws
+}
+
 /// Synchronous SQLite work stays on this actor, never on the UI actor.
-public actor SQLiteHistoryRepository: HistoryRepository {
+public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
     private let directory: URL
     private var store: MemoryStore?
 
@@ -78,6 +86,22 @@ public actor SQLiteHistoryRepository: HistoryRepository {
         // The app's single repository serializes appends with this snapshot and batch delete.
         let ids = try store.listRecent(kind: .dictation, limit: .max).map(\.id)
         try store.delete(ids: ids)
+    }
+
+    public func listTerms() throws -> [DictionaryTerm] {
+        try availableStore().listTerms()
+    }
+
+    public func addTerm(text: String, aliases: [String]) throws -> DictionaryTerm {
+        try availableStore().addTerm(text: text, aliases: aliases)
+    }
+
+    public func updateTerm(id: UUID, text: String, aliases: [String]) throws -> DictionaryTerm {
+        try availableStore().updateTerm(id: id, text: text, aliases: aliases)
+    }
+
+    public func deleteTerm(id: UUID) throws {
+        try availableStore().deleteTerm(id: id)
     }
 
     private func availableStore() throws -> MemoryStore {
