@@ -18,4 +18,14 @@ final class ShortcutValidationTests: XCTestCase {
         XCTAssertNil(cleared.value)
         XCTAssertNil(cleared.message)
     }
+
+    func testDuplicateSavedByAnEarlierBuildIsFoundForBothRecorders() {
+        let saved: [String?] = ["option-space", "option-space", nil, nil]
+        XCTAssertEqual(ShortcutValidation.conflicts(of: 0, in: saved), [1])
+        XCTAssertEqual(ShortcutValidation.conflicts(of: 1, in: saved), [0])
+        XCTAssertEqual(ShortcutValidation.conflicts(of: 2, in: saved), [], "unbound recorders never conflict")
+        XCTAssertEqual(ShortcutValidation.conflicts(of: 3, in: saved), [])
+        XCTAssertEqual(ShortcutValidation.conflicts(of: 0, in: ["a", "b", "c", nil]), [])
+        XCTAssertEqual(ShortcutValidation.conflicts(of: 9, in: saved), [])
+    }
 }

@@ -231,7 +231,7 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertTrue(fake.pending.isEmpty)
         XCTAssertEqual(fake.accessRequests, 0)
         let date = Date(timeIntervalSince1970: 1_900_000_000)
-        let identifier = NoteNotification.identifier(for: note.id)
+        let identifier = NoteNotification.identifier(for: note.id, due: date)
         await history.remindNote(id: note.id, date: date).value
         XCTAssertEqual(fake.accessRequests, 1)
         XCTAssertEqual(fake.pending[identifier]?.text, note.finalText)
@@ -304,7 +304,7 @@ final class VoiceNotesTests: XCTestCase {
         await history!.deliver(note, destination: .note) { _ in XCTFail("Notes never paste") }
         await history!.pendingSave?.value
         await history!.remindNote(id: note.id, date: clock.addingTimeInterval(600)).value
-        let id = NoteNotification.identifier(for: note.id)
+        let id = NoteNotification.identifier(for: note.id, due: clock.addingTimeInterval(600))
         XCTAssertNotNil(fake.pending[id])
         if clickLaunchesApp { history = nil }
         // macOS fires the request, then a click or Clear All removes its delivered entry.
@@ -338,11 +338,11 @@ final class VoiceNotesTests: XCTestCase {
         await history.refreshNotes()
         XCTAssertEqual(history.notes.count, 100, "Capped reminders remain in Notes")
         func pendingIDs(_ range: Range<Int>) -> Set<String> {
-            Set(range.map { NoteNotification.identifier(for: ids[$0]) })
+            Set(range.map { NoteNotification.identifier(for: ids[$0], due: initial.addingTimeInterval(Double($0 + 1) * 60)) })
         }
         XCTAssertEqual(Set(fake.pending.keys), pendingIDs(0..<60))
         XCTAssertEqual(history.notes.filter { $0.reminderScheduledFor != nil }.count, 60)
-        let fired = NoteNotification.identifier(for: ids[0])
+        let fired = NoteNotification.identifier(for: ids[0], due: initial.addingTimeInterval(60))
         clock = initial.addingTimeInterval(60)
         fake.pending[fired] = nil
         fake.delivered.insert(fired)
@@ -429,8 +429,8 @@ final class VoiceNotesTests: XCTestCase {
         let relaunched = makeHistory(notifications: fake, now: { afterDue })
         await relaunched.start().value
         await relaunched.refreshNotes()
-        let futureID = NoteNotification.identifier(for: future.id)
-        let overdueID = NoteNotification.identifier(for: overdue.id)
+        let futureID = NoteNotification.identifier(for: future.id, due: clock.addingTimeInterval(3600))
+        let overdueID = NoteNotification.identifier(for: overdue.id, due: clock.addingTimeInterval(60))
         XCTAssertEqual(fake.pending[futureID]?.date, clock.addingTimeInterval(3600))
         XCTAssertEqual(fake.added.filter { $0.identifier == overdueID }.count, 1)
         XCTAssertNil(fake.added.first { $0.identifier == overdueID }?.date)
@@ -451,8 +451,9 @@ final class VoiceNotesTests: XCTestCase {
         let note = sample("delivered")
         await history.deliver(note, destination: .note) { _ in XCTFail() }
         await history.pendingSave?.value
-        await history.remindNote(id: note.id, date: .now.addingTimeInterval(60)).value
-        let identifier = NoteNotification.identifier(for: note.id)
+        let due = Date.now.addingTimeInterval(60)
+        await history.remindNote(id: note.id, date: due).value
+        let identifier = NoteNotification.identifier(for: note.id, due: due)
         fake.delivered.insert(identifier)
         fake.pending = [:]
         fake.added = []
@@ -507,7 +508,7 @@ final class VoiceNotesTests: XCTestCase {
         fake.failAdd = false
         await history.reconcileReminders().value
         XCTAssertNil(history.notificationError)
-        XCTAssertNotNil(fake.pending[NoteNotification.identifier(for: note.id)])
+        XCTAssertNotNil(fake.pending[NoteNotification.identifier(for: note.id, due: date)])
     }
 
     func testReminderFilterAppliesBeforePaginationAndNotificationTargetEscapesFilters() async throws {
@@ -533,7 +534,7 @@ final class VoiceNotesTests: XCTestCase {
         await history.editNote(id: target.id, text: "edited old reminder").value
         XCTAssertEqual(history.notes.last?.id, target.id)
         XCTAssertEqual(history.notes.last?.text, "edited old reminder")
-        XCTAssertEqual(NoteNotification.noteID(for: NoteNotification.identifier(for: target.id)), target.id)
+        XCTAssertEqual(NoteNotification.noteID(for: NoteNotification.identifier(for: target.id, due: .now)), target.id)
         XCTAssertNil(NoteNotification.noteID(for: "another-feature"))
     }
 
@@ -648,13 +649,23 @@ final class VoiceNotesTests: XCTestCase {
 
     private func makeHistory(notifications: FakeNotifications? = nil, now: @escaping () -> Date = { .now }) -> DictationHistory {
         DictationHistory(repository: SQLiteHistoryRepository(directory: directory), notifications: notifications ?? FakeNotifications(),
-                         now: now, defaults: defaults, log: { _ in })
+                         reminderTimer: FakeReminderTimer(), now: now, defaults: defaults, log: { _ in })
     }
 
     private func sample(_ text: String) -> CompletedDictation {
         CompletedDictation(rawText: "raw \(text)", finalText: text, appBundleID: "com.apple.TextEdit",
                            appName: "TextEdit", modelID: "test-model", durationSeconds: 2)
     }
+}
+
+@MainActor
+final class FakeReminderTimer: ReminderTimer {
+    private(set) var armedAt: Date?
+    private var handler: (@MainActor () -> Void)?
+    func arm(at date: Date, fire: @escaping @MainActor () -> Void) { armedAt = date; handler = fire }
+    func cancel() { armedAt = nil; handler = nil }
+    /// The armed wake-up arrives.
+    func fire() { let pending = handler; armedAt = nil; handler = nil; pending?() }
 }
 
 @MainActor
@@ -667,6 +678,7 @@ final class FakeNotifications: NoteNotificationCenter {
     var delivered: Set<String> = []
     var added: [NoteNotification] = []
     var onAdd: ((NoteNotification) -> Void)?
+    var queries = 0
 
     func authorization() async -> NoteNotificationAuthorization { status }
     func requestAuthorization() async throws -> Bool {
@@ -674,8 +686,8 @@ final class FakeNotifications: NoteNotificationCenter {
         status = granted ? .authorized : .denied
         return granted
     }
-    func pendingIdentifiers() async -> Set<String> { Set(pending.keys) }
-    func deliveredIdentifiers() async -> Set<String> { delivered }
+    func pendingIdentifiers() async -> Set<String> { queries += 1; return Set(pending.keys) }
+    func deliveredIdentifiers() async -> Set<String> { queries += 1; return delivered }
     func add(_ notification: NoteNotification) async throws {
         if failAdd { throw CocoaError(.fileWriteNoPermission) }
         added.append(notification)

@@ -18,15 +18,52 @@ public enum NoteNotificationAuthorization: Sendable {
 public struct NoteNotification: Equatable, Sendable {
     public let noteID: UUID?
     public let text: String
+    /// When the request fires. `nil` alerts immediately (catch-up and summary alerts).
     public let date: Date?
-    public var identifier: String { noteID.map(Self.identifier(for:)) ?? Self.summaryIdentifier }
+    /// The due time this alert is for. An immediate catch-up carries the due time it stands in for.
+    public let due: Date?
+    public var identifier: String {
+        guard let noteID else { return Self.summaryIdentifier }
+        return Self.identifier(for: noteID, due: due ?? date)
+    }
     public static let summaryIdentifier = "voice-note-summary"
 
-    public static func identifier(for id: UUID) -> String { "voice-note.\(id.uuidString)" }
+    public init(noteID: UUID?, text: String, date: Date?, due: Date? = nil) {
+        self.noteID = noteID
+        self.text = text
+        self.date = date
+        self.due = due ?? date
+    }
+
+    /// One identifier per note and due time. A notification still in Notification Center therefore
+    /// proves only that this due time was alerted, never an earlier one the reminder was moved from.
+    public static func identifier(for id: UUID, due: Date?) -> String {
+        guard let due else { return "voice-note.\(id.uuidString)" }
+        return "voice-note.\(id.uuidString).\(Int64((due.timeIntervalSince1970 * 1000).rounded()))"
+    }
+
     public static func noteID(for identifier: String) -> UUID? {
         guard identifier.hasPrefix("voice-note.") else { return nil }
-        return UUID(uuidString: String(identifier.dropFirst("voice-note.".count)))
+        let rest = identifier.dropFirst("voice-note.".count)
+        return UUID(uuidString: String(rest.prefix(36)))
     }
+}
+
+/// Why a reconcile is allowed to alert for reminders that came due without a macOS notification.
+public enum ReminderCatchUp: Sendable {
+    /// Top up and repair only. Never alert.
+    case off
+    /// VoiceApp was just opened, so it was not running when these came due.
+    case afterLaunch
+    /// VoiceApp was running when these came due.
+    case running
+}
+
+/// Which reminders to hand to macOS again even if a matching request is already pending.
+public enum ReminderResubmit: Sendable {
+    case none
+    case notes(Set<UUID>)
+    case all
 }
 
 @MainActor
@@ -69,13 +106,26 @@ public final class SystemNoteNotificationCenter: NoteNotificationCenter {
         try await center.add(Self.request(for: notification))
     }
 
-    public static func request(for notification: NoteNotification, timeZone: TimeZone = .current) -> UNNotificationRequest {
+    public static func request(for notification: NoteNotification, timeZone: TimeZone = .current,
+                               now: Date = .now) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = "VoiceApp reminder"
         content.body = notification.text
         content.sound = .default
-        let trigger = notification.date.map { Self.calendarTrigger(for: $0, timeZone: timeZone) }
+        let trigger = notification.date.map { Self.trigger(for: $0, timeZone: timeZone, now: now) }
         return UNNotificationRequest(identifier: notification.identifier, content: content, trigger: trigger)
+    }
+
+    /// A calendar trigger has whole-second resolution and never fires once its second has passed.
+    /// Due times round up to the next whole second so a reminder is never early, and a time that is
+    /// a moment away uses an interval trigger so it cannot miss its second while being handed over.
+    public static func trigger(for date: Date, timeZone: TimeZone = .current, now: Date = .now) -> UNNotificationTrigger {
+        let target = Date(timeIntervalSince1970: date.timeIntervalSince1970.rounded(.up))
+        let remaining = target.timeIntervalSince(now)
+        if remaining < 2 {
+            return UNTimeIntervalNotificationTrigger(timeInterval: max(1, remaining), repeats: false)
+        }
+        return calendarTrigger(for: target, timeZone: timeZone)
     }
 
     /// Use local calendar components, disambiguating the second occurrence of a repeated hour.
@@ -97,6 +147,34 @@ public final class SystemNoteNotificationCenter: NoteNotificationCenter {
     }
 }
 
+/// Wakes VoiceApp at the next reminder's due time, since macOS only tells a menu-bar app about
+/// a delivered notification when the app is frontmost or the notification is clicked.
+@MainActor
+public protocol ReminderTimer: AnyObject {
+    func arm(at date: Date, fire: @escaping @MainActor () -> Void)
+    func cancel()
+}
+
+@MainActor
+public final class SystemReminderTimer: ReminderTimer {
+    private var task: Task<Void, Never>?
+
+    public init() {}
+
+    public func arm(at date: Date, fire: @escaping @MainActor () -> Void) {
+        task?.cancel()
+        task = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(max(1, date.timeIntervalSinceNow))) } catch { return }
+            fire()
+        }
+    }
+
+    public func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
 @MainActor
 public final class NoteReminderScheduler {
     public static let pendingLimit = 60
@@ -112,54 +190,93 @@ public final class NoteReminderScheduler {
         return status
     }
 
-    public func remove(id: UUID) { center.remove(identifiers: [NoteNotification.identifier(for: id)]) }
+    /// Remove every pending and delivered notification of one note, whatever due time it carries.
+    public func remove(id: UUID) async {
+        let owned = await center.pendingIdentifiers().union(center.deliveredIdentifiers())
+        center.remove(identifiers: owned.filter { NoteNotification.noteID(for: $0) == id })
+    }
 
     public func removeOrphans(notes: [VoiceNote]) async {
-        let active = Set(notes.filter { !$0.isDone && $0.reminderDate != nil }.map { NoteNotification.identifier(for: $0.id) })
+        let active = Set(notes.filter { !$0.isDone && $0.reminderDate != nil }
+            .map { NoteNotification.identifier(for: $0.id, due: $0.reminderDate) })
         let pending = await center.pendingIdentifiers()
         let delivered = await center.deliveredIdentifiers()
         let owned = pending.union(delivered).filter { NoteNotification.noteID(for: $0) != nil }
-        center.remove(identifiers: Set(owned).subtracting(active))
+        let orphans = owned.subtracting(active)
+        if !orphans.isEmpty { center.remove(identifiers: orphans) }
     }
 
-    /// Reconcile as a batch so missed reminders produce at most one catch-up alert.
-    public func reconcile(notes: [VoiceNote], now: Date, catchUp: Bool,
+    /// `notes` are the notes that carry a reminder. Reconcile as a batch so reminders that came due
+    /// without a notification produce at most one catch-up alert.
+    ///
+    /// Every reminder alerts once per due time. A request handed to macOS for that due time is the
+    /// alert; a reminder that was never handed over, or that came due while notifications were off,
+    /// gets one immediate catch-up instead.
+    public func reconcile(notes: [VoiceNote], now: Date, catchUp: ReminderCatchUp, resubmit: ReminderResubmit = .none,
                           didSchedule: (UUID, Date?) async throws -> Void,
                           didAlert: (UUID) async throws -> Void) async throws {
         await removeOrphans(notes: notes)
         var firstError: (any Error)?
+        let pending = await center.pendingIdentifiers()
         let future = notes.filter { !$0.isDone && $0.reminderDate.map({ $0 > now }) == true }.sorted {
             if $0.reminderDate == $1.reminderDate { return $0.id.uuidString < $1.id.uuidString }
             return $0.reminderDate! < $1.reminderDate!
         }
         let scheduled = Array(future.prefix(Self.pendingLimit))
         let deferred = Array(future.dropFirst(Self.pendingLimit))
-        center.remove(identifiers: Set(deferred.map { NoteNotification.identifier(for: $0.id) }))
+        center.remove(identifiers: Set(deferred.map { NoteNotification.identifier(for: $0.id, due: $0.reminderDate) }))
         for note in deferred where note.reminderScheduledFor != nil {
             try await didSchedule(note.id, nil)
         }
         for note in scheduled {
+            let identifier = NoteNotification.identifier(for: note.id, due: note.reminderDate)
+            if note.reminderScheduledFor == note.reminderDate, pending.contains(identifier), !resubmit.includes(note.id) {
+                continue
+            }
             do {
                 try await center.add(NoteNotification(noteID: note.id, text: note.text, date: note.reminderDate))
                 try await didSchedule(note.id, note.reminderDate)
             } catch { firstError = firstError ?? error }
         }
-        if catchUp {
+        if catchUp != .off {
             let due = notes.filter { !$0.isDone && $0.reminderDate.map({ $0 <= now }) == true && $0.reminderNotifiedAt == nil }
             let delivered = await center.deliveredIdentifiers()
             let missed = due.filter {
-                $0.reminderScheduledFor != $0.reminderDate && !delivered.contains(NoteNotification.identifier(for: $0.id))
+                $0.reminderScheduledFor != $0.reminderDate
+                    && !delivered.contains(NoteNotification.identifier(for: $0.id, due: $0.reminderDate))
             }
             do {
                 if missed.count > 1 {
-                    try await center.add(NoteNotification(noteID: nil,
-                        text: "\(missed.count) reminders were due while VoiceApp was closed", date: nil))
+                    let text = catchUp == .afterLaunch
+                        ? "\(missed.count) reminders were due while VoiceApp was closed"
+                        : "\(missed.count) reminders are due"
+                    try await center.add(NoteNotification(noteID: nil, text: text, date: nil))
                 } else if let note = missed.first {
-                    try await center.add(NoteNotification(noteID: note.id, text: note.text, date: nil))
+                    try await center.add(NoteNotification(noteID: note.id, text: note.text, date: nil, due: note.reminderDate))
                 }
                 for note in due { try await didAlert(note.id) }
             } catch { firstError = firstError ?? error }
         }
         if let firstError { throw firstError }
+    }
+
+    /// Notifications are off: a reminder handed over for a due time that has passed was probably not
+    /// shown. Forget the handoff so the first reconcile with notifications on alerts for it once.
+    public func forgetHandoffs(notes: [VoiceNote], now: Date,
+                               didSchedule: (UUID, Date?) async throws -> Void) async throws {
+        for note in notes where !note.isDone && note.reminderNotifiedAt == nil && note.reminderScheduledFor != nil
+            && note.reminderDate.map({ $0 <= now }) == true {
+            try await didSchedule(note.id, nil)
+        }
+    }
+}
+
+extension ReminderResubmit {
+    func includes(_ id: UUID) -> Bool {
+        switch self {
+        case .none: return false
+        case .notes(let ids): return ids.contains(id)
+        case .all: return true
+        }
     }
 }

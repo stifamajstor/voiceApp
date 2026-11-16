@@ -9,6 +9,8 @@ public struct VoiceNote: Identifiable, Equatable, Sendable {
     public let reminderNotifiedAt: Date?
     public let reminderScheduledFor: Date?
 
+    public var hasActiveReminder: Bool { !isDone && reminderDate != nil }
+
     public func isOverdue(at date: Date) -> Bool {
         !isDone && reminderDate.map { $0 <= date } == true
     }

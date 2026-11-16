@@ -193,17 +193,29 @@ unasked permission from notifications turned off. If denied, the reminder stays 
 to VoiceApp's notification settings. After enabling notifications, use **Refresh notifications**.
 Notification previews may show note text according to macOS settings.
 
+Each reminder alerts exactly once for every time you set it to. Changing a reminder's time withdraws
+the notification for the old time, so a banner still in Notification Center never hides the new
+alert. If you set a reminder to a time that has already passed, you get one alert right away.
+If notifications were off when a reminder came due, you never saw it, so VoiceApp shows one
+catch-up alert the next time it sees notifications on (at launch, on **Refresh notifications**, or
+at the next reminder). VoiceApp can only notice this while it is running or when it launches: if you
+turn notifications off and on again while VoiceApp is closed, it cannot tell and shows nothing.
+Reminders beyond the 60 that macOS holds still alert at their due time while VoiceApp is running.
+
 The original transcript stays immutable. A local `noteState` side table holds current edited text,
 done state, due date, successful OS handoff for that due date, and an alerted timestamp. Note deletion
 scrubs both the transcript
 and side state, retaining only the record tombstone. Notes share the history store actor and ordered
 write queue, including quit draining. Future notifications are restored on launch using a stable ID
-per note, using calendar-date triggers in the current time zone, with repeated DST hours disambiguated.
-Time-zone changes reschedule future requests. Only the nearest 60 future reminders are scheduled;
-all others remain in Notes. Delivery and changes refill available slots. At launch, a due reminder
-successfully handed to macOS is treated as delivered, even after a click or Clear All. Only never
-scheduled reminders get a catch-up alert; multiple missed reminders produce one count summary.
-The alerted timestamp prevents repeated catch-ups; reminders remain overdue until removed or done.
+per note and due time, using calendar-date triggers in the current time zone, with repeated DST hours
+disambiguated. Due times round up to a whole second; one a moment away uses an interval trigger.
+Time-zone and clock changes reschedule future requests. Only the nearest 60 future reminders are
+scheduled; all others remain in Notes. A timer wakes VoiceApp just after the next due time to refill
+slots and to alert for a reminder macOS was never given. Edits touch only the changed notification.
+A due reminder successfully handed to macOS is treated as delivered, even after a click or Clear All,
+unless notifications were off when VoiceApp last looked. Reminders macOS never received get a
+catch-up alert; several at once produce one count summary. The alerted timestamp prevents repeats;
+reminders remain overdue until removed or done.
 SQLite and the notification service cannot commit atomically; launch reconciliation repairs pending
 requests after interruption. A crash between notification handoff and its timestamp save can repeat
 an alert. Focus and OS settings

@@ -143,12 +143,17 @@ struct SettingsView: View {
 }
 
 /// The recorder persists before calling onChange; restore the last accepted value on conflict.
+/// A duplicate saved by an earlier build is shown too, never silently disabled.
 private struct ValidatedShortcutRecorder: View {
     private static let names: [KeyboardShortcuts.Name] = [.pushToTalk, .toggleToTalk, .notePushToTalk, .noteToggle]
+    private static let titles = ["Push to talk — key combo", "Toggle to talk — key combo", "Note — push to talk", "Note — toggle"]
+    // KeyboardShortcuts posts this when any binding changes; its name is not public API.
+    private static let changed = Notification.Name("KeyboardShortcuts_shortcutByNameDidChange")
     let title: String
     let name: KeyboardShortcuts.Name
     @State private var accepted: KeyboardShortcuts.Shortcut?
     @State private var message: String?
+    @State private var changeCount = 0
 
     init(_ title: String, name: KeyboardShortcuts.Name) {
         self.title = title
@@ -156,7 +161,16 @@ private struct ValidatedShortcutRecorder: View {
         _accepted = State(initialValue: KeyboardShortcuts.getShortcut(for: name))
     }
 
+    private var existingConflict: String? {
+        guard let index = Self.names.firstIndex(of: name) else { return nil }
+        let others = ShortcutValidation.conflicts(of: index, in: Self.names.map { KeyboardShortcuts.getShortcut(for: $0) })
+            .map { "“\(Self.titles[$0])”" }
+        guard !others.isEmpty else { return nil }
+        return "Also assigned to \(others.joined(separator: " and ")). Only one of them will respond. Record a different combination."
+    }
+
     var body: some View {
+        let _ = changeCount
         KeyboardShortcuts.Recorder(title, name: name) { candidate in
             let result = ShortcutValidation.resolve(candidate: candidate, previous: accepted,
                 others: Self.names.filter { $0 != name }.map { KeyboardShortcuts.getShortcut(for: $0) })
@@ -164,7 +178,8 @@ private struct ValidatedShortcutRecorder: View {
             accepted = result.value
             if result.message != nil { KeyboardShortcuts.setShortcut(result.value, for: name) }
         }
-        if let message { Text(message).font(.callout).foregroundStyle(Theme.warning) }
+        .onReceive(NotificationCenter.default.publisher(for: Self.changed)) { _ in changeCount += 1 }
+        if let text = message ?? existingConflict { Text(text).font(.callout).foregroundStyle(Theme.warning) }
     }
 }
 
