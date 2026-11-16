@@ -27,6 +27,51 @@ public struct MemoryRecord: Identifiable, Codable, Equatable, Sendable {
     public let durationSeconds: Double?
     public let audioPath: String?
     public let deletedAt: Date?
+    public let correctionInputText: String?
+    public let correctionProvider: String?
+    public let correctionModel: String?
+    public let correctionStatus: String?
+    public let correctionReason: String?
+
+    public init(
+        id: UUID,
+        deviceID: UUID,
+        kind: RecordKind,
+        createdAt: Date,
+        rawText: String,
+        finalText: String,
+        appBundleID: String?,
+        appName: String?,
+        project: String?,
+        modelID: String?,
+        durationSeconds: Double?,
+        audioPath: String?,
+        deletedAt: Date?,
+        correctionInputText: String? = nil,
+        correctionProvider: String? = nil,
+        correctionModel: String? = nil,
+        correctionStatus: String? = nil,
+        correctionReason: String? = nil
+    ) {
+        self.id = id
+        self.deviceID = deviceID
+        self.kind = kind
+        self.createdAt = createdAt
+        self.rawText = rawText
+        self.finalText = finalText
+        self.appBundleID = appBundleID
+        self.appName = appName
+        self.project = project
+        self.modelID = modelID
+        self.durationSeconds = durationSeconds
+        self.audioPath = audioPath
+        self.deletedAt = deletedAt
+        self.correctionInputText = correctionInputText
+        self.correctionProvider = correctionProvider
+        self.correctionModel = correctionModel
+        self.correctionStatus = correctionStatus
+        self.correctionReason = correctionReason
+    }
 }
 
 extension MemoryRecord: FetchableRecord, PersistableRecord {

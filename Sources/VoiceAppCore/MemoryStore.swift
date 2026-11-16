@@ -83,7 +83,12 @@ public final class MemoryStore: Sendable {
         project: String? = nil,
         modelID: String? = nil,
         durationSeconds: Double? = nil,
-        audioExtension: String? = nil
+        audioExtension: String? = nil,
+        correctionInputText: String? = nil,
+        correctionProvider: String? = nil,
+        correctionModel: String? = nil,
+        correctionStatus: String? = nil,
+        correctionReason: String? = nil
     ) throws -> MemoryRecord {
         if let durationSeconds, !durationSeconds.isFinite || durationSeconds < 0 {
             throw StoreError.invalidDuration
@@ -95,7 +100,12 @@ public final class MemoryStore: Sendable {
             createdAt: Date(timeIntervalSince1970: createdAt.timeIntervalSince1970),
             rawText: rawText, finalText: finalText ?? rawText, appBundleID: appBundleID,
             appName: appName, project: project, modelID: modelID,
-            durationSeconds: durationSeconds, audioPath: audioPath, deletedAt: nil
+            durationSeconds: durationSeconds, audioPath: audioPath, deletedAt: nil,
+            correctionInputText: correctionInputText,
+            correctionProvider: correctionProvider,
+            correctionModel: correctionModel,
+            correctionStatus: correctionStatus,
+            correctionReason: correctionReason
         )
         return try database.write { db in
             try record.insert(db)
@@ -243,7 +253,10 @@ public final class MemoryStore: Sendable {
                 try db.execute(sql: """
                     UPDATE records SET kind = NULL, createdAt = NULL, rawText = NULL, finalText = NULL,
                         appBundleID = NULL, appName = NULL, project = NULL, modelID = NULL,
-                        durationSeconds = NULL, audioPath = NULL, deletedAt = ?
+                        durationSeconds = NULL, audioPath = NULL,
+                        correctionInputText = NULL, correctionProvider = NULL, correctionModel = NULL,
+                        correctionStatus = NULL, correctionReason = NULL,
+                        deletedAt = ?
                     WHERE id = ?
                     """, arguments: [Date.now.timeIntervalSince1970, id.uuidString])
                 deleted = true
@@ -525,6 +538,37 @@ public final class MemoryStore: Sendable {
         }
         migrator.registerMigration("notes.reminderHandoff") { db in
             try db.execute(sql: "ALTER TABLE noteState ADD COLUMN reminderScheduledFor REAL")
+        }
+        migrator.registerMigration("correction.addMetadata") { db in
+            try db.execute(sql: """
+                ALTER TABLE records ADD COLUMN correctionInputText TEXT;
+                ALTER TABLE records ADD COLUMN correctionProvider TEXT;
+                ALTER TABLE records ADD COLUMN correctionModel TEXT;
+                ALTER TABLE records ADD COLUMN correctionStatus TEXT;
+                ALTER TABLE records ADD COLUMN correctionReason TEXT;
+                CREATE TRIGGER records_correction_tombstone_insert BEFORE INSERT ON records
+                WHEN NEW.deletedAt IS NOT NULL AND (
+                    NEW.correctionInputText IS NOT NULL
+                    OR NEW.correctionProvider IS NOT NULL
+                    OR NEW.correctionModel IS NOT NULL
+                    OR NEW.correctionStatus IS NOT NULL
+                    OR NEW.correctionReason IS NOT NULL
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'tombstones cannot retain correction metadata');
+                END;
+                CREATE TRIGGER records_correction_tombstone_update BEFORE UPDATE ON records
+                WHEN NEW.deletedAt IS NOT NULL AND (
+                    NEW.correctionInputText IS NOT NULL
+                    OR NEW.correctionProvider IS NOT NULL
+                    OR NEW.correctionModel IS NOT NULL
+                    OR NEW.correctionStatus IS NOT NULL
+                    OR NEW.correctionReason IS NOT NULL
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'tombstones cannot retain correction metadata');
+                END;
+                """)
         }
         return migrator
     }

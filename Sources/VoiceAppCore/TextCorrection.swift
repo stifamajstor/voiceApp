@@ -5,6 +5,8 @@ public struct TextReplacement: Equatable, Sendable {
     /// UTF-16 range in the original input, suitable for NSString and NSAttributedString.
     public let range: NSRange
     public let replacement: String
+    /// UTF-16 range in the corrected output text (`TextCorrectionResult.text`).
+    public let outputRange: NSRange
     public let termID: UUID
 }
 
@@ -19,7 +21,7 @@ public func correctText(_ text: String, terms: [DictionaryTerm]) -> TextCorrecti
     CorrectionMatcher(terms: terms).correct(text)
 }
 
-private struct CorrectionEdit {
+private struct DictionaryCorrectionEdit {
     let range: NSRange
     let term: DictionaryTerm
 }
@@ -144,11 +146,11 @@ public struct CorrectionMatcher: Sendable {
             converged: converged)
     }
 
-    private func edits(in text: String) -> [CorrectionEdit] {
+    private func edits(in text: String) -> [DictionaryCorrectionEdit] {
         let string = text as NSString
         let boundaries = WordBoundaries(text)
         let units = normalizedUnits(text)
-        var candidates: [CorrectionEdit] = []
+        var candidates: [DictionaryCorrectionEdit] = []
         for start in units.indices where units[start].isStart && boundaries.allowsStart(units[start].range.location) {
             var node = 0
             var end = start
@@ -158,7 +160,7 @@ public struct CorrectionMatcher: Sendable {
                     let range = NSRange(location: units[start].range.location,
                         length: NSMaxRange(units[end].range) - units[start].range.location)
                     if boundaries.allowsEnd(NSMaxRange(range)) {
-                        for term in nodes[node].terms { candidates.append(CorrectionEdit(range: range, term: term)) }
+                        for term in nodes[node].terms { candidates.append(DictionaryCorrectionEdit(range: range, term: term)) }
                     }
                 }
                 end += 1
@@ -171,7 +173,7 @@ public struct CorrectionMatcher: Sendable {
             return $0.term.text.utf8.lexicographicallyPrecedes($1.term.text.utf8)
         }
         var occupied = Array(repeating: false, count: string.length)
-        var edits: [CorrectionEdit] = []
+        var edits: [DictionaryCorrectionEdit] = []
         for candidate in candidates {
             let range = candidate.range.location..<NSMaxRange(candidate.range)
             guard !occupied[range].contains(true) else { continue }
@@ -274,10 +276,17 @@ private func mergedReplacements(original: NSString, output: NSString, sources: [
             }
             cursor += 1
         }
-        let replacement = output.substring(with: NSRange(location: start, length: cursor - start))
+        let outputRange = NSRange(location: start, length: cursor - start)
+        let replacement = output.substring(with: outputRange)
         let before = original.substring(with: range)
         if !before.utf8.elementsEqual(replacement.utf8) {
-            replacements.append(TextReplacement(original: before, range: range, replacement: replacement, termID: termID))
+            replacements.append(TextReplacement(
+                original: before,
+                range: range,
+                replacement: replacement,
+                outputRange: outputRange,
+                termID: termID
+            ))
         }
     }
     return replacements

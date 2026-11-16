@@ -11,6 +11,7 @@ struct VoiceApp: App {
     @StateObject private var history: DictationHistory
     @StateObject private var dictionary: UserDictionary
     @StateObject private var notesWindow: NotesWindowController
+    @StateObject private var cloudCorrection: CloudCorrectionService
     @StateObject private var historyWindow: HistoryWindowController
     @StateObject private var termination: HistoryTermination
     @StateObject private var updater = Updater()
@@ -21,9 +22,16 @@ struct VoiceApp: App {
         let modelManager = ModelManager()
         let history = DictationHistory(repository: repository)
         let dictionary = UserDictionary(repository: repository)
-        let dictation = DictationController(modelManager: modelManager, history: history, dictionary: dictionary)
+        let cloudCorrection = CloudCorrectionService()
+        let dictation = DictationController(
+            modelManager: modelManager,
+            history: history,
+            dictionary: dictionary,
+            cloudCorrection: cloudCorrection
+        )
         _history = StateObject(wrappedValue: history)
         _dictionary = StateObject(wrappedValue: dictionary)
+        _cloudCorrection = StateObject(wrappedValue: cloudCorrection)
         let historyWindow = HistoryWindowController(history: history)
         _historyWindow = StateObject(wrappedValue: historyWindow)
         let notesWindow = NotesWindowController(history: history)
@@ -64,6 +72,7 @@ struct VoiceApp: App {
             SettingsView()
                 .environmentObject(history)
                 .environmentObject(dictionary)
+                .environmentObject(cloudCorrection)
                 .environmentObject(modelManager)
                 .environmentObject(updater)
         }
@@ -81,6 +90,8 @@ struct MenuBarIcon: View {
         switch dictation.state {
         case .recording:
             Image(nsImage: Self.recordingImage)
+        case .correcting:
+            Image(systemName: "text.badge.checkmark").help("Correcting…")
         case .transcribing:
             Image(nsImage: Self.transcribingImage)
         case .error:

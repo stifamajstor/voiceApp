@@ -37,6 +37,7 @@ public final class HistoryTermination: ObservableObject {
         let deleteFailures = history.deleteFailures
         waiting = Task {
             await transcription?.value
+            guard !Task.isCancelled else { return }
             while let tail = history.pendingSave, !Task.isCancelled {
                 await tail.value
             }

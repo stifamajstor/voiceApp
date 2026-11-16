@@ -112,9 +112,13 @@ public final class DictationHistory: ObservableObject {
     private var recentGeneration = 0
     private var resultLimit = pageSize
 
+    private nonisolated static let defaultDebounce: @Sendable (Duration) async throws -> Void = {
+        try await Task.sleep(for: $0)
+    }
+
     public init(repository: any HistoryRepository = SQLiteHistoryRepository(),
                 notifications: (any NoteNotificationCenter)? = nil, notificationEvents: NotificationCenter = .default, now: @escaping () -> Date = { .now }, defaults: UserDefaults = .standard,
-                debounce: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+                debounce: (@Sendable (Duration) async throws -> Void)? = nil,
                 log: @escaping (String) -> Void = {
                     Logger(subsystem: "com.local.voiceapp", category: "History").error("\($0, privacy: .private)")
                 }) {
@@ -123,7 +127,7 @@ public final class DictationHistory: ObservableObject {
         self.notificationEvents = notificationEvents
         self.now = now
         self.defaults = defaults
-        self.debounce = debounce
+        self.debounce = debounce ?? Self.defaultDebounce
         self.log = log
         saveEnabled = defaults.object(forKey: Self.saveEnabledKey) as? Bool ?? true
         timeZoneObserver = notificationEvents.addObserver(forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { [weak self] _ in
@@ -177,10 +181,17 @@ public final class DictationHistory: ObservableObject {
         sessionRecent = Array(sessionRecent.prefix(3))
         updateRecent()
         let enabled = saveEnabled
+        var delivered = dictation
         defer {
-            if enabled { save(dictation) }
+            if enabled { save(delivered) }
         }
-        try await paste(dictation.finalText)
+        do {
+            try await paste(dictation.finalText)
+        } catch is DictationDelivery.TargetChanged {
+            delivered.appBundleID = nil
+            delivered.appName = "Clipboard"
+            throw DictationDelivery.TargetChanged()
+        }
     }
 
     private func save(_ dictation: CompletedDictation) {

@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
+import VoiceAppCore
 
 /// Inserts text into the frontmost app by borrowing the clipboard: save it, put the text on it,
 /// post ⌘V, then put the old contents back. All calls must happen on the main actor
@@ -31,6 +32,7 @@ enum TextInserter {
     }
 
     private struct PendingRestore {
+        let pasteboard: NSPasteboard
         let items: [SavedItem]
         let changeCount: Int
         let task: Task<Void, Never>
@@ -51,26 +53,40 @@ enum TextInserter {
     /// Pastes `text` into the focused app. If Accessibility isn't granted the text is left on the
     /// clipboard and `InsertError.accessibilityNotGranted` is thrown. With `keepOnClipboard` the
     /// transcript stays on the clipboard afterwards instead of the previous contents coming back.
-    static func insert(_ text: String, keepOnClipboard: Bool = false) async throws {
+    static func insert(
+        _ text: String,
+        keepOnClipboard: Bool = false,
+        targetProcessID: pid_t?,
+        pasteboard: NSPasteboard = .general,
+        frontmostProcessID: @MainActor () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        accessibilityGranted: @MainActor () -> Bool = { Permissions.accessibilityGranted },
+        waitForModifiers: @MainActor () async -> Void = { await waitForModifierRelease() },
+        sendPaste: @MainActor () -> Bool = { postPaste() }
+    ) async throws {
         guard !text.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
 
         // A previous insertion may still be waiting to restore the user's clipboard. Do that now so
         // we don't snapshot our own transcript as if it were the user's data.
         flushPendingRestore()
 
-        guard Permissions.accessibilityGranted else {
+        guard accessibilityGranted() else {
             write(text, to: pasteboard, transient: false)
             throw InsertError.accessibilityNotGranted
         }
 
         // If the user is still holding the hotkey's modifiers, ⌘V would arrive as e.g. ⌥⌘V.
-        await waitForModifierRelease()
+        await waitForModifiers()
+
+        // Check after the modifier wait: focus can change during that suspension too.
+        guard let targetProcessID, frontmostProcessID() == targetProcessID else {
+            write(text, to: pasteboard, transient: false)
+            throw DictationDelivery.TargetChanged()
+        }
 
         let saved = keepOnClipboard ? [] : capture(pasteboard)
         let ourChangeCount = write(text, to: pasteboard, transient: !keepOnClipboard)
 
-        guard postPaste() else {
+        guard sendPaste() else {
             write(text, to: pasteboard, transient: false) // keep it available for a manual ⌘V
             throw InsertError.pasteEventFailed
         }
@@ -81,7 +97,7 @@ enum TextInserter {
             guard !Task.isCancelled else { return }
             flushPendingRestore()
         }
-        pending = PendingRestore(items: saved, changeCount: ourChangeCount, task: task)
+        pending = PendingRestore(pasteboard: pasteboard, items: saved, changeCount: ourChangeCount, task: task)
     }
 
     // MARK: Pasteboard
@@ -111,7 +127,7 @@ enum TextInserter {
         self.pending = nil
         pending.task.cancel()
 
-        let pasteboard = NSPasteboard.general
+        let pasteboard = pending.pasteboard
         // Someone (the user, another app) changed the clipboard since we wrote ours: leave it alone.
         guard pasteboard.changeCount == pending.changeCount else { return }
 

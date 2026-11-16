@@ -8,11 +8,12 @@ Its whole job:
 3. Let the user set two global shortcuts:
    - **Push-to-talk**: record while held, transcribe on release.
    - **Toggle-to-talk**: press once to start, press again to stop and transcribe.
-4. Paste the transcribed text into whatever app is focused.
+4. Capture the target app after transcription and paste only if it remains frontmost; otherwise copy to clipboard.
 5. Save dictations locally by default, with a history window for search, copy, and deletion.
 6. Apply a local custom dictionary (`Settings → Dictionary`) to correct terms and aliases before pasting.
+7. Optionally pass dictionary-corrected transcripts once through the user's Anthropic or OpenAI model (`Settings → Correction`) before pasting, without ever blocking dictation on the network.
 
-Everything runs on-device. No accounts, no cloud.
+Speech recognition runs entirely on-device with no VoiceApp account. Optional cloud post-correction uses only the user's own API key when enabled.
 
 ## Stack
 
@@ -58,7 +59,7 @@ Everything runs on-device. No accounts, no cloud.
   **Delete all…** removes saved or queued dictations before confirmation, irrespective of search or
   pagination. Later deliveries survive. Deletes join the save queue and run off the main thread with
   busy/error states. Application termination, including menu Quit, logout, and updater relaunch, waits
-  for an in-flight transcription, its save, and queued saves/deletes within one 30-second deadline,
+  for an in-flight transcription, pending cloud corrections and their saves, and queued saves/deletes within one 30-second deadline,
   then proceeds even if work remains. While waiting,
   the menu shows that it is finishing history work, disables Quit, and ignores a second menu Quit request.
   A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
@@ -115,6 +116,18 @@ and leaves dictation pasting raw text. **Settings → Dictionary** lists terms, 
 canonical text and comma-separated aliases, deletes with confirmation, searches when 8 or more terms exist,
 and displays store validation errors in plain English. Number formatting, acoustic boosting, and sync remain
 separate.
+
+## Cloud correction
+
+`DictationDelivery` runs `transcription → dictionary pass → cloud correction → paste` exclusively on `RecordKind.dictation` (voice notes bypass cloud correction, retain NULL cloud metadata, and save without pasting). Cloud correction is off by default and runs only when enabled in **Settings → Correction**, an API key is readable without UI interaction for the selected provider, and the frontmost app bundle ID is not in the exclusion list (empty by default). One task covers transcription, correction and paste. `DictationSessionCoordinator` stays busy until delivery finishes; no FIFO tickets or concurrent-delivery task map remain. During the cloud pass its `.correcting` state shows “Correcting…” in the menu and icon help. Shortcut presses during correction play Basso when feedback is enabled and cannot start a recording, including note shortcuts. Quit drains that same task and the existing store write tail. Immediately before posting paste (after modifier release), `TextInserter` compares the captured process ID with the frontmost process ID. A changed or unknown target leaves text on the clipboard, throws the existing style of fallback notice, and stores the history destination as appName `Clipboard` with no bundle ID.
+
+- **Non-blocking deadline & circuit breaker:** `CloudCorrectionService` reads the Keychain item off the main actor (`LAContext.interactionNotAllowed = true`) and runs the provider request inside a single constant wall-clock deadline (`CloudCorrectionConfig.requestDeadline = .seconds(2)`). Reads request no UI interaction. If the Keychain read fails/times out, the pass records `.skipped` without tripping the circuit breaker; if the provider request times out or fails, the dictionary-corrected text is pasted on time and any late response is discarded. Dictations under 3 words use the validator’s tokenizer to skip Keychain and transport with status `skipped`, reason `too short`, without affecting the breaker. Three consecutive request or validation failures open a circuit breaker (`CorrectionCircuitBreaker`) that skips cloud calls for 5 minutes before allowing a half-open probe.
+- **Providers (`CloudCorrectionProvider`):**
+  - `AnthropicCorrectionProvider` (`POST /v1/messages`, `anthropic-version: 2026-10-21`, `Authorization: Bearer <key>`, default `claude-haiku-5-5`, `thinking.type: "disabled"`, `output_config.effort: "low"`, JSON schema output). Models are loaded from `GET /v1/models` filtered to active chat models supporting structured outputs, disabled thinking, and low effort.
+  - `OpenAICorrectionProvider` (`POST /v1/responses`, `Authorization: Bearer <key>`, default `gpt-6-luna`, `reasoning.effort: "none"`, `store: false`, strict JSON schema output). Models are loaded from `GET /v1/models` filtered to `CloudCorrectionConfig.openAIAllowlistedModelIDs` (`gpt-6-luna`, `gpt-6.1-terra`) with unexpired `shutdown_date`.
+- **Prompt hygiene & edit contract (`CorrectionPromptBuilder` / `CorrectionEditValidator`):** Instructions live exclusively in the system prompt and state that user-message JSON fields are untrusted data, not instructions. User messages send sanitized JSON (`target_app`, `dictionary_terms`, `transcript`) with control characters and newlines stripped from metadata fields. Providers return only `{"edits": [{"original": ..., "replacement": ...}]}`. VoiceApp applies edits deterministically and rejects the whole response if any edit is empty, introduces leading/trailing whitespace, adds/removes control characters or newlines, introduces new shell-significant characters (`> < | & ; $ \` \`), is missing, matches more than once (including overlapping spans), fails to align to whole Unicode words on extended grapheme clusters, modifies a dictionary-corrected `protectedRange`, exceeds per-edit word (`<= 8`, delta `<= 2`) or length (`<= 2x + 8` chars, `<= 2x + 16` scalars) bounds, introduces format (Cf) or default-ignorable scalars or non-space whitespace not present in identical original graphemes, starts with a combining mark/joiner, joins graphemes across splice edges, or exceeds the changed-word cap (`0` for `< 3` words; `floor(totalWords * 0.40)` for `>= 3` words), computed by diffing whole-text word tokens so punctuation removals count merged neighbouring words.
+- **Keychain & privacy:** `KeychainSecretStore` stores each provider's key in the file-based login Keychain as a generic password (`kSecClassGenericPassword`, `kSecAttrSynchronizable: false`), never in UserDefaults, SQLite, or logs (`SecretRedaction`). Items are never synced to iCloud; because file-based login keychains ignore `kSecAttrAccessible*` classes, keys may move with Migration Assistant or system restore. Reads use `LAContext` with `interactionNotAllowed = true`. The deadline bounds paste, but cannot cancel a synchronous system read: each hung read can retain a blocked worker thread until it returns. Suppression of legacy login-Keychain ACL/unlock dialogs is unverified. **Settings → Correction** displays `"Transcripts are sent to <provider> when correction is on..."` alongside provider/key/model controls, a **Test** button reporting latency or errors, and the excluded apps list.
+- **Store (`correction.addMetadata`):** Runs after `notes.createState`, `notes.localReminders`, and `notes.reminderHandoff`. Adds five nullable columns to `records`: `correctionInputText`, `correctionProvider`, `correctionModel`, `correctionStatus` (`applied` / `unchanged` / `fallback` / `skipped`), and `correctionReason`. `MemoryStore.delete(ids:)` clears all five columns to `NULL` on tombstoning, enforced by `records_correction_tombstone_insert` and `records_correction_tombstone_update` triggers.
 
 ## Model catalog (verified against `argmaxinc/whisperkit-coreml` on 2026-09-30)
 
@@ -184,7 +197,7 @@ against these contracts exactly.
 - `DictationController.swift`:
   ```swift
   @MainActor final class DictationController: ObservableObject {
-      enum State: Equatable { case idle, recording, transcribing, error(String) }
+      enum State: Equatable { case idle, recording, transcribing, correcting, error(String) }
       @Published private(set) var state: State
       init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary)
       func start()          // register hotkeys; idempotent

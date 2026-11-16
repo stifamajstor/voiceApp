@@ -9,6 +9,7 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Local dictation history with search, copy, and deletion.
 - Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
 - Voice notes with separate shortcuts, editing, done state, and in-app reminders.
+- Optional cloud correction in Settings using your own Anthropic or OpenAI API key (off by default).
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -51,7 +52,7 @@ These scripts do not notarize the app. A locally signed DMG shared with another 
 2. Download a model. The default selection is **Whisper Large v3 Turbo**; smaller models are also available.
 3. Click **Use** for the model you want, if it is not already selected. Wait for **Active** in Settings and **Ready to dictate** in the menu.
 4. Grant **Microphone** and **Accessibility** in the Permissions section. Accessibility enables automatic paste and modifier-only shortcuts.
-5. Focus a text field in another app, hold **right Option (⌥)**, speak, then release. VoiceApp transcribes and sends **⌘V** to the app that has focus when pasting.
+5. Focus a text field in another app, hold **right Option (⌥)**, speak, then release. VoiceApp captures the target app after transcription and sends **⌘V** only if that app is still frontmost when pasting.
 
 The first model load can take longer while Core ML prepares it for your Mac. If the microphone prompt appears on your first shortcut press, answer it and press the shortcut again to record.
 
@@ -70,7 +71,7 @@ Both the key combinations and modifier keys are configurable in Settings. A key 
 
 Modifier push-to-talk has a short hold delay. Combining that modifier with another key cancels the recording so ordinary Option-character typing does not produce a transcript. If both modifier actions use the same key, push-to-talk takes precedence.
 
-Recordings shorter than **0.3 seconds** are discarded. Recording stops automatically after **5 minutes**. Additional shortcuts are ignored while transcription is running.
+Recordings shorter than **0.3 seconds** are discarded. Recording stops automatically after **5 minutes**. New recordings wait until the current transcription, correction and paste finish. During the cloud pass the menu shows **Correcting…**; a shortcut press gives the error sound (when feedback sounds are enabled). Note shortcuts follow the same busy rule.
 
 ## Models and languages
 
@@ -99,6 +100,8 @@ Use the trash button next to a downloaded model in Settings to remove it. Models
 
 Audio capture and speech inference run on your Mac. VoiceApp does not upload recordings for transcription. Network access is used for dependencies, model files, and tokenizer downloads; prepare the selected model and its first load before relying on offline use.
 
+Cloud post-correction is off by default. When you enable it and add an API key, VoiceApp sends the dictionary-corrected transcript, your dictionary term names, and the target app name over HTTPS to the provider you selected (unless the focused app is excluded). OpenAI requests set `store: false` (abuse-monitoring logs may still be kept for up to 30 days); Anthropic does not retain prompts or outputs by default or train on API traffic (flagged content may be retained). API keys live in your login Keychain (`kSecClassGenericPassword`, non-synchronizable — never synced to iCloud, though file-based login keychain items ignore accessibility classes and may transfer with Migration Assistant) and are never stored in UserDefaults, the history database, or logs.
+
 | Permission | Purpose |
 |---|---|
 | Microphone | Record audio while dictation is active |
@@ -106,6 +109,8 @@ Audio capture and speech inference run on your Mac. VoiceApp does not upload rec
 | Notifications (requested on first reminder) | Show VoiceApp reminders when due |
 
 Automatic paste temporarily places the transcript on the system clipboard. VoiceApp restores the previous clipboard contents after about **0.5 seconds**, unless another app or you changed the clipboard in the meantime. It marks automatic-paste entries as transient for clipboard managers that honor `org.nspasteboard.TransientType`; other managers may retain them.
+
+If the target app changes before paste, the transcript stays on the clipboard, history labels its destination **Clipboard**, and the menu reports **Copied to clipboard — the target app changed**.
 
 Without Accessibility, the transcript stays on the clipboard and the menu reports **Copied to clipboard — grant Accessibility to auto-paste**. Paste it yourself with **⌘V**.
 
@@ -125,7 +130,7 @@ Every deletion asks for confirmation with the number of dictations to remove and
 dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
 Search and deletion run in the background with a busy indicator; large deletes can take seconds.
 Quitting from the menu or through macOS application termination (including logout and updater relaunch)
-waits for an in-flight transcription and its save, plus queued saves and deletes, within one 30-second
+waits for an in-flight transcription, cloud corrections and their saves, plus queued saves and deletes, within one 30-second
 deadline, then proceeds even if work remains. New recordings are ignored while quitting; dictation paste
 may be skipped, but its history save still runs. While
 waiting, the menu says it is finishing history work, disables Quit, and ignores a second menu Quit request.
@@ -197,12 +202,26 @@ an alert. Focus and OS settings
 can suppress visible delivery. The first permission dialog currently holds the ordered store queue
 until answered; dictation paste remains independent of that queue.
 
+## Cloud correction
+
+Enable **Correct dictations with a cloud model** in **Settings → Correction** to pass each
+dictionary-corrected dictation once through your own **Anthropic** (`claude-haiku-5-5` default,
+Messages API with thinking disabled and low effort) or **OpenAI** (`gpt-6-luna` default,
+Responses API with `reasoning.effort: "none"` and `store: false`) model before pasting.
+
+- **Non-blocking deadline & Keychain reads:** Reading the API key from Keychain (`interactionNotAllowed`) and the network request both run off the main actor under a single 2-second wall-clock deadline (`CloudCorrectionConfig.requestDeadline`). Reads request no UI interaction. If the read fails or the deadline expires, VoiceApp delivers the dictionary text and discards late responses. The current dictation stays busy through correction and paste. A hung system Keychain read cannot be cancelled: it can leave one worker thread blocked per attempted read until the system call returns; paste still meets the deadline. Suppression of legacy login-Keychain ACL/unlock dialogs has not been verified.
+- **Short dictations:** Fewer than 3 words (using the validator’s Unicode word tokenizer) skip Keychain and network access, record `skipped: too short`, and do not affect the circuit breaker.
+- **Circuit breaker:** After 3 consecutive request or validation failures, cloud correction pauses for 5 minutes and falls back to dictionary text without network calls.
+- **Structured edit contract:** Models receive system instructions explicitly separating untrusted JSON user-message data (`target_app`, `dictionary_terms`, `transcript`) and return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically on whole Unicode words and extended grapheme clusters, protects dictionary-replaced words, rejects new format (Cf) and default-ignorable scalars, non-space whitespace, leading combining marks/joiners, grapheme joins across edit edges, control characters/newlines, leading/trailing whitespace changes, or new shell characters (`> < | & ; $ \` \`), rejects ambiguous or overlapping spans, bounds per-edit length/word expansion, and requires dictations to have at least 3 words while capping changed words at `floor(totalWords * 0.40)` using a diff of the entire transcript’s word tokens. Existing invisible scalars must remain in identical graphemes.
+- **Models and testing:** Settings populates the model picker from each provider's `GET /v1/models` endpoint (OpenAI is filtered to a short allowlist of fast `reasoning.effort: "none"` models: `gpt-6-luna`, `gpt-6.1-terra`) and includes a **Test** button that sends a short sample and displays latency or errors in plain words.
+- **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. Voice notes (`RecordKind.note`) never run through this dictation pass; they save dictionary text with NULL cloud metadata and save without pasting. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
+
 ## Troubleshooting
 
 - **No Dock icon or window:** this is a menu bar app. Click its microphone icon to open Settings or quit.
 - **No model ready:** download and select a model, then wait for loading to finish. If loading fails, inspect the message in Settings and use **Retry**. A Whisper model's first load may still need internet access for its tokenizer.
 - **No recording:** check Microphone permission, wait for the model to become active, and try a key combination. Modifier-only shortcuts also need Accessibility.
-- **Text is copied but not pasted:** enable VoiceApp under **System Settings → Privacy & Security → Accessibility**, then try again. Keep the intended text field focused until transcription finishes.
+- **Text is copied but not pasted:** enable VoiceApp under **System Settings → Privacy & Security → Accessibility**, then try again. Keep the intended text field focused until correction and paste finish; switching apps leaves the text on the clipboard.
 - **Paste or modifier shortcuts stop working after a rebuild:** remove VoiceApp from Accessibility and add the current `.app` again. Ad-hoc signatures can invalidate the existing grant. A stable signing identity helps preserve it across builds.
 - **Shortcut conflicts with another app:** rebind it in Settings. A modifier-only trigger is canceled if you type another key while holding it.
 - **Disable start/stop sounds:** turn off **Play start/stop sounds** in Settings → Behavior.
@@ -246,8 +265,8 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | Path | Responsibility |
 |---|---|
 | `Sources/VoiceApp/App.swift` | App lifecycle and menu bar scene |
-| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, custom dictionary and text correction, search and deletion state |
-| `Tests/VoiceAppCoreTests/` | Store, history, dictionary, and text correction tests |
+| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, custom dictionary and text correction, cloud correction providers and Keychain wrapper, search and deletion state |
+| `Tests/VoiceAppCoreTests/` | Store, history, dictionary, text correction, and cloud correction tests |
 | `ModelCatalog.swift`, `ModelManager.swift`, `ParakeetEngine.swift` | Model catalog, downloads, loading, and transcription |
 | `DictationController.swift`, `AudioRecorder.swift` | Dictation state and microphone capture |
 | `HotkeyManager.swift`, `ModifierHotkey.swift` | Global shortcuts |
