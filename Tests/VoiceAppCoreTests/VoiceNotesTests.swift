@@ -480,6 +480,27 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertNotNil(history.noteError)
     }
 
+    func testDefaultDebounceSurvivesCancelledNoteSearch() async throws {
+        let clock = Date.now
+        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory),
+                                       notifications: FakeNotifications(), now: { clock }, defaults: defaults, log: { _ in })
+        let note = sample("Call Alex")
+        await history.deliver(note, destination: .note) { _ in XCTFail() }
+        await history.pendingSave?.value
+        for _ in 0..<20 {
+            history.noteQuery = "Call"
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(10))
+            history.noteQuery = ""
+            await history.refreshNotes()
+            await history.openNote(id: note.id)
+            XCTAssertEqual(history.notes.map(\.id), [note.id])
+            XCTAssertEqual(history.focusedNoteID, note.id)
+            XCTAssertFalse(history.isSearchingNotes)
+            XCTAssertNil(history.noteSearchError)
+        }
+    }
+
     private func makeHistory(notifications: FakeNotifications? = nil, now: @escaping () -> Date = { .now }) -> DictationHistory {
         DictationHistory(repository: SQLiteHistoryRepository(directory: directory), notifications: notifications ?? FakeNotifications(),
                          now: now, defaults: defaults, log: { _ in })
