@@ -7,10 +7,18 @@ import XCTest
 final class ReminderCalendarTests: XCTestCase {
     func testCalendarTriggersKeepSpringForwardAndBothFallBackInstants() throws {
         let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
-        let formatter = ISO8601DateFormatter()
-        for text in ["2027-03-14T06:30:00Z", "2027-03-14T07:30:00Z",
-                     "2027-11-07T05:30:00Z", "2027-11-07T06:30:00Z"] {
-            let due = try XCTUnwrap(formatter.date(from: text))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let year = calendar.component(.year, from: .now) + 1
+        // US DST: second Sunday in March, first Sunday in November. Keep trigger dates in the future.
+        let spring = try XCTUnwrap(calendar.date(from: DateComponents(year: year, month: 3,
+            hour: 1, minute: 30, weekday: 1, weekdayOrdinal: 2)))
+        let fall = try XCTUnwrap(calendar.date(from: DateComponents(year: year, month: 11,
+            hour: 1, minute: 30, weekday: 1, weekdayOrdinal: 1)))
+        let dates = [spring, spring.addingTimeInterval(3600), fall, fall.addingTimeInterval(3600)]
+        XCTAssertEqual(dates.map { calendar.component(.hour, from: $0) }, [1, 3, 1, 1])
+        for due in dates {
+            let text = due.description
             let request = SystemNoteNotificationCenter.request(for: NoteNotification(noteID: UUID(), text: "DST", date: due), timeZone: zone)
             let trigger = try XCTUnwrap(request.trigger as? UNCalendarNotificationTrigger)
             XCTAssertFalse(trigger.repeats)
