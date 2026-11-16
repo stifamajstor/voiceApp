@@ -199,6 +199,8 @@ against these contracts exactly.
 - Separate configurable `notePushToTalk` and `noteToggle` key combinations start unbound.
   A recording retains its destination until transcription finishes; other shortcuts cannot end it.
   Notes record the app active at recording start and never call text insertion or mutate the clipboard.
+  Transcripts go through `DictationDelivery` filtering and dictionary correction before note delivery,
+  retaining immutable raw and corrected text just like dictation history.
 - The Notes window lists notes newest first, searches current edited text (last word prefix),
   paginates, copies, edits, marks done/undone, and confirms deletion.
 - Original `.note` records remain immutable. `noteState` holds current text, done state,

@@ -147,7 +147,8 @@ and dictation and paste continue. Recent transcripts remain available in memory 
 Add terms and optional comma-separated aliases in **Settings → Dictionary** (for example,
 `Mac` with aliases `MEC, Meg`). Before pasting, VoiceApp replaces matching whole words
 case-insensitively using an in-memory matcher rebuilt only when the dictionary changes, so
-correction adds no store I/O to dictation or paste.
+correction adds no store I/O to dictation or paste. Voice notes use the same correction before saving,
+keeping both the raw transcript and corrected text without pasting.
 
 Leading and trailing whitespace is trimmed from term text and aliases, and blank aliases are
 dropped. Duplicate terms or conflicting aliases are rejected with plain-English messages.
