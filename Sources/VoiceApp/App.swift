@@ -106,7 +106,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func requestMenuQuit() {
         // Let the SwiftUI button action return so the pending menu can repaint.
-        perform(#selector(quitFromMenu), with: nil, afterDelay: 0, inModes: [.common])
+        // Default mode only: after a cancelled quit AppKit is still inside its first terminate call,
+        // running a modal-panel loop. A .common-mode perform would fire there, and a second
+        // terminate skips the delegate and exits with queued saves unwritten.
+        perform(#selector(quitFromMenu), with: nil, afterDelay: 0, inModes: [.default])
     }
 
     @objc private func quitFromMenu() {
