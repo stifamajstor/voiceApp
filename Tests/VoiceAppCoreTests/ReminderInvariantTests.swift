@@ -63,6 +63,7 @@ private final class ReminderWorld {
     var log: [String] = []
     var failure: String?
     var catchUps = 0
+    var mostHeld = 0
 
     init(seed: UInt64) {
         self.seed = seed
@@ -98,8 +99,10 @@ private final class ReminderWorld {
         markReached()
     }
 
+    /// A clock, zone or wake event must make VoiceApp look at its reminders again.
     private func waitForPass(after passes: Int) async {
-        for _ in 0..<3000 where history.reminderPasses <= passes { try? await Task.sleep(for: .milliseconds(1)) }
+        for _ in 0..<300 where history.reminderPasses <= passes { try? await Task.sleep(for: .milliseconds(1)) }
+        if history.reminderPasses <= passes { fail("VoiceApp did not look at its reminders after the event") }
         await history.pendingSave?.value
     }
 
@@ -268,21 +271,28 @@ private final class ReminderWorld {
         }
         let roll = Int.random(in: 0..<100, using: &generator)
         switch roll {
-        case 0..<22: // set or re-set, sometimes to the time it already has
+        case 0..<20: // set or re-set, sometimes to the time it already has
             guard let note = pickNote({ !doneNotes.contains($0) }) else { return }
-            let offsets: [Double] = [-7200, -60, -1, 0, 1, 5, 30, 60, 90, 300, 3600, 7200, 86_400]
+            let offsets: [Double] = [-7200, -60, -1, 0, 1, 5, 30, 60, 90, 300, 3600, 3600, 7200, 7200, 86_400, 86_400]
             var due = Date(timeIntervalSince1970: clock.now.timeIntervalSince1970.rounded(.down) + offsets.randomElement(using: &generator)!)
             if let existing = current[note], Int.random(in: 0..<5, using: &generator) == 0 { due = sets[existing].due }
             log.append("set note \(notes.firstIndex(of: note)!) to \(due.timeIntervalSince(Date(timeIntervalSince1970: 1_900_000_000)))s (now \(clock.now.timeIntervalSince(Date(timeIntervalSince1970: 1_900_000_000)))s, \(fake.status))")
             // The model first: an alert for a past time arrives during the call itself.
             begin(note, due: due)
             await history.remindNote(id: note, date: due).value
-        case 22..<27:
+        case 22..<25: // every note gets a reminder in the future, more than the window holds
+            log.append("set a reminder on every note")
+            for note in notes where !gone.contains(note) && !doneNotes.contains(note) {
+                let due = Date(timeIntervalSince1970: clock.now.timeIntervalSince1970.rounded(.down) + [60.0, 600, 3600, 7200, 86_400].randomElement(using: &generator)!)
+                begin(note, due: due)
+                await history.remindNote(id: note, date: due).value
+            }
+        case 25..<28:
             guard let note = pickNote() else { return }
             log.append("remove reminder of note \(notes.firstIndex(of: note)!)")
             end(note)
             await history.removeNoteReminder(id: note).value
-        case 27..<32:
+        case 28..<32:
             guard let note = pickNote({ !doneNotes.contains($0) }) else { return }
             log.append("edit note \(notes.firstIndex(of: note)!)")
             await history.editNote(id: note, text: "edited \(Int.random(in: 0..<1000, using: &generator))").value
@@ -308,7 +318,7 @@ private final class ReminderWorld {
             gone.insert(note)
         case 39..<43:
             log.append("create note")
-            if notes.count < 6 { await createNote() }
+            if notes.count < 8 { await createNote() }
         case 43..<49:
             log.append("notifications off")
             fake.status = .denied
@@ -371,6 +381,7 @@ private final class ReminderWorld {
                 fail("\(set.label) was handed to macOS again after it alerted")
             }
         }
+        mostHeld = max(mostHeld, fake.pending.count)
         if fake.pending.count > Self.limit { fail("\(fake.pending.count) requests with macOS, more than the \(Self.limit) it may hold") }
         for identifier in Set(fake.pending.keys).union(fake.delivered) where NoteNotification.noteID(for: identifier) != nil {
             let note = NoteNotification.noteID(for: identifier)!
@@ -423,7 +434,7 @@ private final class ReminderWorld {
 
 @MainActor
 final class ReminderInvariantTests: XCTestCase {
-    private static var totals = (sets: 0, alerts: 0, dropped: 0, cancelled: 0, catchUps: 0, steps: 0)
+    private static var totals = (sets: 0, alerts: 0, dropped: 0, cancelled: 0, catchUps: 0, steps: 0, mostHeld: 0)
 
     private var sequences: Int {
         ProcessInfo.processInfo.environment["REMINDER_FUZZ_SEQUENCES"].flatMap(Int.init) ?? 100
@@ -434,7 +445,7 @@ final class ReminderInvariantTests: XCTestCase {
         let world = ReminderWorld(seed: seed)
         defer { world.cleanUp() }
         await world.launch()
-        for _ in 0..<3 { await world.createNote() }
+        for _ in 0..<5 { await world.createNote() }
         var performed = 0
         while performed < steps, world.failure == nil {
             await world.step()
@@ -446,6 +457,7 @@ final class ReminderInvariantTests: XCTestCase {
         Self.totals.dropped += world.sets.filter(\.droppedWhileOff).count
         Self.totals.cancelled += world.sets.filter { $0.visibleWhenEnded != nil }.count
         Self.totals.catchUps += world.catchUps
+        Self.totals.mostHeld = max(Self.totals.mostHeld, world.mostHeld)
         Self.totals.steps += world.log.count
         if let failure = world.failure {
             XCTFail("seed \(seed): \(failure)\nlast steps:\n" + world.log.suffix(45).joined(separator: "\n"))
@@ -459,6 +471,6 @@ final class ReminderInvariantTests: XCTestCase {
         let seeds = ProcessInfo.processInfo.environment["REMINDER_FUZZ_SEED"].flatMap(UInt64.init).map { $0...$0 } ?? 1...UInt64(sequences)
         for seed in seeds where await !run(seed: seed, steps: 40) { break }
         let t = Self.totals
-        print("RANDOM-RUN-SUMMARY sequences=\(sequences) steps=\(t.steps) setTimes=\(t.sets) alertsShown=\(t.alerts) catchUpsPosted=\(t.catchUps) droppedWhileOff=\(t.dropped) endedBeforeSettle=\(t.cancelled)")
+        print("RANDOM-RUN-SUMMARY sequences=\(sequences) steps=\(t.steps) setTimes=\(t.sets) alertsShown=\(t.alerts) catchUpsPosted=\(t.catchUps) droppedWhileOff=\(t.dropped) endedBeforeSettle=\(t.cancelled) mostRequestsHeldAtOnce=\(t.mostHeld)")
     }
 }

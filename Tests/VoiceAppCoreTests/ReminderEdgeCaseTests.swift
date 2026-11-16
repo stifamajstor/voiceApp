@@ -437,6 +437,27 @@ final class ReminderEdgeCaseTests: XCTestCase {
         XCTAssertEqual(catchUpAlerts(fake).count, 2)
     }
 
+    func testSettingTheSameTimeAgainStartsOverAndWithdrawsTheEarlierBanner() async throws {
+        let fake = FakeNotifications()
+        let clock = TestClock(start)
+        let history = make(fake, clock)
+        let id = await newNote(history, "same time")
+        let due = start.addingTimeInterval(600)
+        await history.remindNote(id: id, date: due).value
+        clock.now = due.addingTimeInterval(5)
+        present(fake, id, clear: false) // macOS shows it and the banner stays
+        await history.reconcileReminders().value
+        await history.refreshNotes()
+        XCTAssertEqual(history.notes.first?.reminder, .alerted(dueAt: due))
+        // The clock is set back and the user sets the very same time again: a new reminder, nothing of the old one left.
+        clock.now = start
+        await history.remindNote(id: id, date: due).value
+        XCTAssertNil(key(id, in: fake.delivered), "the banner of the earlier alert is gone")
+        XCTAssertNotNil(key(id, in: fake.pending.keys), "handed to macOS again, because this is a new set")
+        await history.refreshNotes()
+        XCTAssertEqual(history.notes.first?.reminder, .handedToMacOS(dueAt: due))
+    }
+
     func testTheSavedStateIsPerNoteAndSurvivesARelaunchUnchanged() async throws {
         let fake = FakeNotifications()
         let clock = TestClock(start)
