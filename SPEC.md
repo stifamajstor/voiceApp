@@ -252,8 +252,8 @@ against these contracts exactly.
   changes. The window distinguishes not asked yet from turned off. Denial keeps the due date and
   exposes notification settings.
 - Every reminder has one explicit state, saved with its note as `noteState.reminderDate` (the due time)
-  and `noteState.reminderPhase` (`notes.reminderState` replaces the two timestamps `reminderNotifiedAt`
-  and `reminderScheduledFor` and backfills the phase from them). `ReminderStateMachine` is a pure
+  and `noteState.reminderPhase` (`notes.reminderState`, appended after `correction.addMetadata`, replaces the two timestamps
+  `reminderNotifiedAt` and `reminderScheduledFor` and backfills the phase from them). `ReminderStateMachine` is a pure
   function `next(state, event)`; the persisted state is the only source of "was this alerted?".
   Nothing is inferred at check time from Notification Center contents, from the authorization at that
   moment, or from comparing clocks to timestamps.
