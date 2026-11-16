@@ -155,6 +155,22 @@ database as dictation history. History records keep both the raw transcript and 
 and history search matches both. If the dictionary cannot be loaded, VoiceApp logs the cause,
 shows a warning in **Settings → Dictionary**, and pastes the raw transcript.
 
+## Voice notes
+
+Use **Notes…** in the menu to find voice notes. Configure **Note — push to talk** or
+**Note — toggle** in Settings → Shortcuts; both start unbound. Notes are saved locally even
+when dictation history is off, and never pasted or placed on the clipboard automatically.
+
+Notes show the app active when recording began. Search, copy, edit, mark done, or delete with
+confirmation. **Remind me…** lets you choose a date and time for an Apple Reminder in your
+default list. **Undo reminder** removes that reminder. Reminders access is requested only for
+these actions; denied access offers a link to System Settings. No dates are detected automatically.
+
+The original transcript stays immutable. A local `noteState` side table holds current edited text,
+done state, and the reminder identifier/date. Note deletion scrubs both the transcript and side
+state, retaining only the record tombstone. Notes share the history store actor and ordered write
+queue, including quit draining. Edits and done state do not update an already-created Apple Reminder.
+
 ## Troubleshooting
 
 - **No Dock icon or window:** this is a menu bar app. Click its microphone icon to open Settings or quit.
