@@ -28,7 +28,7 @@ public final class UserDictionary: ObservableObject {
     }
 
     private let repository: any DictionaryRepository
-    private let timeBudget: Duration
+    private let timeBudgetOverride: Duration?
     private let retryDelays: [Duration]
     private let sleep: @Sendable (Duration) async throws -> Void
     private let log: (String) -> Void
@@ -43,7 +43,7 @@ public final class UserDictionary: ObservableObject {
 
     public init(
         repository: any DictionaryRepository = SQLiteHistoryRepository(),
-        timeBudget: Duration = CorrectionMatcher.defaultTimeBudget,
+        timeBudget: Duration? = nil,
         retryDelays: [Duration] = UserDictionary.defaultRetryDelays,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         log: @escaping (String) -> Void = {
@@ -51,7 +51,7 @@ public final class UserDictionary: ObservableObject {
         }
     ) {
         self.repository = repository
-        self.timeBudget = timeBudget
+        self.timeBudgetOverride = timeBudget
         self.retryDelays = retryDelays
         self.sleep = sleep
         self.log = log
@@ -93,9 +93,10 @@ public final class UserDictionary: ObservableObject {
         if loadState == .failed {
             retryLoadIfNeeded()
         }
-        let result = matcher.correct(text, timeBudget: timeBudget)
+        let budget = timeBudgetOverride ?? CorrectionMatcher.timeBudget(for: text)
+        let result = matcher.correct(text, timeBudget: budget)
         if result.timedOut {
-            log("Dictionary correction exceeded time budget; pasted raw text.")
+            log("Dictionary correction reached a work or CPU-time limit; pasted raw text.")
         }
         return result
     }

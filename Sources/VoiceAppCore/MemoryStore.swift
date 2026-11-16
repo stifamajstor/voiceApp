@@ -333,10 +333,10 @@ public final class MemoryStore: Sendable {
 
     private static func validateTerm(text: String, aliases: [String], excluding id: UUID?, in db: Database) throws {
         guard !DictionaryTerm.matchKey(text).isEmpty else { throw DictionaryError.emptyText }
-        guard text.count <= DictionaryTerm.maximumLength else {
+        guard !DictionaryTerm.exceedsLengthLimit(text) else {
             throw DictionaryError.textTooLong(limit: DictionaryTerm.maximumLength)
         }
-        for alias in aliases where alias.count > DictionaryTerm.maximumLength {
+        for alias in aliases where DictionaryTerm.exceedsLengthLimit(alias) {
             throw DictionaryError.aliasTooLong(value: alias, limit: DictionaryTerm.maximumLength)
         }
         let existing = try DictionaryTerm.fetchAll(db,

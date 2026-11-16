@@ -34,7 +34,8 @@ public struct DictionaryTerm: Identifiable, Codable, Equatable, Sendable {
     }
 
     public static func exceedsLengthLimit(_ value: String) -> Bool {
-        trimEdgeWhitespace(value).count > maximumLength
+        let trimmed = trimEdgeWhitespace(value)
+        return trimmed.unicodeScalars.count > maximumLength || trimmed.count > maximumLength
     }
 
     static func trimEdgeWhitespace(_ value: String) -> String {
@@ -110,10 +111,10 @@ public enum DictionaryError: Error, Equatable, LocalizedError {
         case .emptyText:
             return "Term text cannot be blank."
         case .textTooLong(let limit):
-            return "Term text must be \(limit) characters or fewer."
+            return "Term text must be \(limit) characters and \(limit) Unicode scalars or fewer."
         case .aliasTooLong(let value, let limit):
             let preview = value.count > 24 ? String(value.prefix(24)) + "…" : value
-            return "Alias \"\(preview)\" must be \(limit) characters or fewer."
+            return "Alias \"\(preview)\" must be \(limit) characters and \(limit) Unicode scalars or fewer."
         case .conflict(let value, _):
             return "\"\(value)\" is already used by another term or alias."
         case .termNotFound:

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct TextReplacement: Equatable, Sendable {
@@ -14,6 +15,7 @@ public struct TextCorrectionResult: Equatable, Sendable {
     public let text: String
     public let replacements: [TextReplacement]
     public let converged: Bool
+    /// True when a CPU deadline or candidate-work limit discards all corrections.
     public let timedOut: Bool
 
     public init(text: String, replacements: [TextReplacement], converged: Bool, timedOut: Bool = false) {
@@ -27,8 +29,16 @@ public struct TextCorrectionResult: Equatable, Sendable {
 /// Applies up to eight longest-match passes. A false convergence flag means a pass, growth, or time limit was reached.
 public func correctText(
     _ text: String,
+    terms: [DictionaryTerm]
+) -> TextCorrectionResult {
+    CorrectionMatcher(terms: terms).correct(text)
+}
+
+/// An explicit budget overrides input-length scaling; nil disables the CPU deadline.
+public func correctText(
+    _ text: String,
     terms: [DictionaryTerm],
-    timeBudget: Duration? = CorrectionMatcher.defaultTimeBudget
+    timeBudget: Duration?
 ) -> TextCorrectionResult {
     CorrectionMatcher(terms: terms).correct(text, timeBudget: timeBudget)
 }
@@ -48,6 +58,19 @@ private struct CorrectionSource {
 public struct CorrectionMatcher: Sendable {
     public static let empty = CorrectionMatcher(terms: [])
     public static let defaultTimeBudget: Duration = .milliseconds(50)
+    // Bound candidate storage and ordering even for densely nested dictionaries.
+    private static let maximumCandidates = 32_768
+
+    public static func timeBudget(for text: String) -> Duration {
+        let thousands = text.utf16.count / 1_000
+        return defaultTimeBudget + .milliseconds(thousands * 10)
+    }
+
+    static func threadCPUTime() -> Duration {
+        var time = timespec()
+        precondition(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) == 0)
+        return .seconds(time.tv_sec) + .nanoseconds(time.tv_nsec)
+    }
 
     private struct Node: Sendable {
         var children: [Unicode.Scalar: Int] = [:]
@@ -62,14 +85,14 @@ public struct CorrectionMatcher: Sendable {
             let trimmedText = DictionaryTerm.trimEdgeWhitespace(term.text)
             guard term.deletedAt == nil,
                   !trimmedText.isEmpty,
-                  trimmedText.count <= DictionaryTerm.maximumLength else { continue }
+                  !DictionaryTerm.exceedsLengthLimit(trimmedText) else { continue }
             var normalizedTerm = term
             normalizedTerm.text = trimmedText
             var seen: Set<String> = []
             for value in [trimmedText] + term.aliases {
                 let trimmedValue = DictionaryTerm.trimEdgeWhitespace(value)
                 guard !trimmedValue.isEmpty,
-                      trimmedValue.count <= DictionaryTerm.maximumLength else { continue }
+                      !DictionaryTerm.exceedsLengthLimit(trimmedValue) else { continue }
                 let folded = trimmedValue.folding(options: .caseInsensitive, locale: locale)
                     .precomposedStringWithCanonicalMapping
                 var scalars: [Unicode.Scalar] = []
@@ -99,27 +122,36 @@ public struct CorrectionMatcher: Sendable {
         }
     }
 
-    /// Applies up to eight longest-match passes. If `timeBudget` is exceeded, returns the raw input text.
+    /// Uses thread CPU time, allowing 50 ms plus 10 ms per complete 1,000 UTF-16 units.
+    public func correct(_ text: String, now: (() -> Duration)? = nil) -> TextCorrectionResult {
+        correct(text, timeBudget: Self.timeBudget(for: text), now: now)
+    }
+
+    /// Applies up to eight longest-match passes. Work/deadline limits return the raw input text.
     public func correct(
         _ text: String,
-        timeBudget: Duration? = Self.defaultTimeBudget,
-        now: () -> ContinuousClock.Instant = { ContinuousClock.now }
+        timeBudget: Duration?,
+        now: (() -> Duration)? = nil
     ) -> TextCorrectionResult {
         guard !text.isEmpty, !nodes[0].children.isEmpty else {
             return TextCorrectionResult(text: text, replacements: [], converged: true)
         }
-        let deadline = timeBudget.map { now().advanced(by: $0) }
+        let clock = now ?? Self.threadCPUTime
+        let deadline = timeBudget.map { clock() + $0 }
         func isTimedOut() -> Bool {
             guard let deadline else { return false }
-            return now() >= deadline
+            return clock() >= deadline
         }
         let rawTimedOutResult = TextCorrectionResult(text: text, replacements: [], converged: false, timedOut: true)
         if isTimedOut() { return rawTimedOutResult }
 
         let original = text as NSString
         var output = text
-        var sources = (0..<original.length).map {
-            CorrectionSource(range: NSRange(location: $0, length: 1), termID: nil, generation: 0)
+        var sources: [CorrectionSource] = []
+        sources.reserveCapacity(original.length)
+        for index in 0..<original.length {
+            if (index & 1023) == 0, isTimedOut() { return rawTimedOutResult }
+            sources.append(CorrectionSource(range: NSRange(location: index, length: 1), termID: nil, generation: 0))
         }
         let growthLimit = original.length.addingReportingOverflow(1_048_576)
         let maximumLength = growthLimit.overflow ? Int.max : growthLimit.partialValue
@@ -136,7 +168,8 @@ public struct CorrectionMatcher: Sendable {
             }
             var length = sources.count
             var fits = true
-            for edit in edits {
+            for (index, edit) in edits.enumerated() {
+                if (index & 255) == 0, isTimedOut() { return rawTimedOutResult }
                 let change = edit.term.text.utf16.count - edit.range.length
                 let next = length.addingReportingOverflow(change)
                 if next.overflow || next.partialValue > maximumLength { fits = false; break }
@@ -155,7 +188,9 @@ public struct CorrectionMatcher: Sendable {
                 nextSources.append(contentsOf: sources[cursor..<edit.range.location])
                 let end = NSMaxRange(edit.range)
                 var sourceRange = sources[edit.range.location].range
-                for source in sources[edit.range.location..<end] {
+                for index in edit.range.location..<end {
+                    if (index & 1023) == 0, isTimedOut() { return rawTimedOutResult }
+                    let source = sources[index]
                     sourceRange = NSUnionRange(sourceRange, source.range)
                 }
                 generation += 1
@@ -180,9 +215,9 @@ public struct CorrectionMatcher: Sendable {
             converged = remaining.isEmpty
         }
         if isTimedOut() { return rawTimedOutResult }
-        return TextCorrectionResult(text: output,
-            replacements: mergedReplacements(original: original, output: output as NSString, sources: sources),
-            converged: converged)
+        guard let replacements = mergedReplacements(original: original, output: output as NSString,
+            sources: sources, isTimedOut: isTimedOut), !isTimedOut() else { return rawTimedOutResult }
+        return TextCorrectionResult(text: output, replacements: replacements, converged: converged)
     }
 
     private func edits(in text: String, isTimedOut: () -> Bool) -> [DictionaryCorrectionEdit]? {
@@ -192,41 +227,79 @@ public struct CorrectionMatcher: Sendable {
             return nil
         }
         var candidates: [DictionaryCorrectionEdit] = []
-        for start in units.indices where units[start].isStart && boundaries.allowsStart(units[start].range.location) {
+        var visits = 0
+        for start in units.indices {
             if (start & 255) == 0, isTimedOut() { return nil }
+            guard units[start].isStart && boundaries.allowsStart(units[start].range.location) else { continue }
             var node = 0
             var end = start
             while end < units.count, let child = nodes[node].children[units[end].scalar] {
+                if (visits & 255) == 0, isTimedOut() { return nil }
+                visits += 1
                 node = child
                 if units[end].isEnd && !nodes[node].terms.isEmpty {
                     let range = NSRange(location: units[start].range.location,
                         length: NSMaxRange(units[end].range) - units[start].range.location)
                     if boundaries.allowsEnd(NSMaxRange(range)) {
-                        for term in nodes[node].terms { candidates.append(DictionaryCorrectionEdit(range: range, term: term)) }
+                        for term in nodes[node].terms {
+                            if isTimedOut() || candidates.count >= Self.maximumCandidates { return nil }
+                            candidates.append(DictionaryCorrectionEdit(range: range, term: term))
+                        }
                     }
                 }
                 end += 1
             }
         }
         if isTimedOut() { return nil }
-        candidates.sort {
+        guard checkedSort(&candidates, isTimedOut: isTimedOut, by: {
             if $0.range.length != $1.range.length { return $0.range.length > $1.range.length }
             if $0.range.location != $1.range.location { return $0.range.location < $1.range.location }
             if $0.term.id != $1.term.id { return $0.term.id.uuidString < $1.term.id.uuidString }
             return $0.term.text.utf8.lexicographicallyPrecedes($1.term.text.utf8)
-        }
+        }) else { return nil }
         var occupied = Array(repeating: false, count: string.length)
         var edits: [DictionaryCorrectionEdit] = []
         for (index, candidate) in candidates.enumerated() {
             if (index & 255) == 0, isTimedOut() { return nil }
             let range = candidate.range.location..<NSMaxRange(candidate.range)
-            guard !occupied[range].contains(true) else { continue }
-            for index in range { occupied[index] = true }
+            var overlaps = false
+            for index in range {
+                if (index & 1023) == 0, isTimedOut() { return nil }
+                if occupied[index] { overlaps = true; break }
+            }
+            guard !overlaps else { continue }
+            for index in range {
+                if (index & 1023) == 0, isTimedOut() { return nil }
+                occupied[index] = true
+            }
             if !string.substring(with: candidate.range).utf8.elementsEqual(candidate.term.text.utf8) {
                 edits.append(candidate)
             }
         }
-        return edits.sorted { $0.range.location < $1.range.location }
+        guard checkedSort(&edits, isTimedOut: isTimedOut, by: {
+            $0.range.location < $1.range.location
+        }) else { return nil }
+        return edits
+    }
+}
+
+private enum CorrectionDeadline: Error { case exceeded }
+
+/// Swift's sort is rethrowing, so polling its comparisons also interrupts ordering.
+private func checkedSort<Element>(
+    _ values: inout [Element], isTimedOut: () -> Bool,
+    by precedes: (Element, Element) -> Bool
+) -> Bool {
+    var comparisons = 0
+    do {
+        try values.sort {
+            if (comparisons & 255) == 0, isTimedOut() { throw CorrectionDeadline.exceeded }
+            comparisons += 1
+            return precedes($0, $1)
+        }
+        return !isTimedOut()
+    } catch {
+        return false
     }
 }
 
@@ -258,6 +331,7 @@ private func normalizedUnits(_ text: String, isTimedOut: () -> Bool) -> [Correct
             let folded = Array(value.folding(options: .caseInsensitive, locale: locale)
                 .precomposedStringWithCanonicalMapping.unicodeScalars)
             for (index, scalar) in folded.enumerated() {
+                if (index & 1023) == 1023, isTimedOut() { return nil }
                 // Folding can expand a grapheme (for example ß); never match only part of its source.
                 units.append(CorrectionUnit(scalar: scalar, range: range,
                     isStart: index == 0, isEnd: index == folded.count - 1))
@@ -307,10 +381,13 @@ private struct WordBoundaries {
     }
 }
 
-private func mergedReplacements(original: NSString, output: NSString, sources: [CorrectionSource]) -> [TextReplacement] {
+private func mergedReplacements(
+    original: NSString, output: NSString, sources: [CorrectionSource], isTimedOut: () -> Bool
+) -> [TextReplacement]? {
     var replacements: [TextReplacement] = []
     var cursor = 0
     while cursor < sources.count {
+        if (cursor & 1023) == 0, isTimedOut() { return nil }
         guard var termID = sources[cursor].termID else { cursor += 1; continue }
         var range = sources[cursor].range
         var generation = sources[cursor].generation
@@ -318,6 +395,7 @@ private func mergedReplacements(original: NSString, output: NSString, sources: [
         cursor += 1
         // A partial rewrite still owns the whole earlier source range, including its unchanged edges.
         while cursor < sources.count, sources[cursor].range.location < NSMaxRange(range) {
+            if (cursor & 1023) == 0, isTimedOut() { return nil }
             let source = sources[cursor]
             range = NSUnionRange(range, source.range)
             if source.generation > generation, let lastTerm = source.termID {

@@ -307,7 +307,7 @@ final class UserDictionaryTests: XCTestCase {
         } catch {
             XCTAssertEqual(
                 dictionary.errorMessage(for: error),
-                "Term text must be \(DictionaryTerm.maximumLength) characters or fewer."
+                "Term text must be \(DictionaryTerm.maximumLength) characters and \(DictionaryTerm.maximumLength) Unicode scalars or fewer."
             )
         }
 
@@ -316,7 +316,7 @@ final class UserDictionaryTests: XCTestCase {
             _ = try await dictionary.addTerm(text: "Valid", aliases: [longAlias])
             XCTFail("Expected aliasTooLong error")
         } catch {
-            XCTAssertTrue(dictionary.errorMessage(for: error).contains("must be \(DictionaryTerm.maximumLength) characters or fewer."))
+            XCTAssertTrue(dictionary.errorMessage(for: error).contains("must be \(DictionaryTerm.maximumLength) characters and \(DictionaryTerm.maximumLength) Unicode scalars or fewer."))
         }
     }
 
@@ -343,7 +343,7 @@ final class UserDictionaryTests: XCTestCase {
         XCTAssertTrue(delivered)
         XCTAssertEqual(pasted, "this MEC is fast")
         XCTAssertEqual(logs.count, 1)
-        XCTAssertTrue(logs[0].contains("time budget"))
+        XCTAssertTrue(logs[0].contains("work or CPU-time limit"))
     }
 
     func testLockedDatabaseRetriesWithBackoffAfterWriteLockClears() async throws {

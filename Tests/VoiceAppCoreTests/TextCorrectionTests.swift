@@ -148,11 +148,11 @@ final class TextCorrectionTests: XCTestCase {
         ]
         let matcher = CorrectionMatcher(terms: terms)
         let input = "c b a a"
-        let start = ContinuousClock.now
+        let start = Duration.zero
         var tick = 0
         let timedOut = matcher.correct(input, timeBudget: .milliseconds(50)) {
             defer { tick += 1 }
-            return tick == 0 ? start : start.advanced(by: .milliseconds(60))
+            return tick == 0 ? start : start + .milliseconds(60)
         }
         XCTAssertEqual(timedOut.text, input)
         XCTAssertEqual(timedOut.replacements, [])

@@ -86,7 +86,7 @@ and connection as records, added by the named migration `dictionary.createTerms`
 canonical `text`, `aliases`, UTC `updatedAt`, the persistent install `deviceID`, and optional `deletedAt`.
 `addTerm` and `updateTerm` trim leading and trailing whitespace on term text and aliases, drop blank
 or self-matching aliases, collapse duplicate aliases within a term, and enforce `DictionaryTerm.maximumLength`
-(`100` characters) before validating and saving. Edits advance the per-term clock and record the current `deviceID`;
+(`100` characters and `100` Unicode scalars per value) before validating and saving. Edits advance the per-term clock and record the current `deviceID`;
 deletion clears text and aliases and retains a terminal tombstone for future last-writer-wins sync.
 Listing returns live terms in UUID order. Empty or whitespace-only text is rejected. Two live terms
 cannot share a canonical spelling or alias under Unicode case folding and whitespace normalization;
@@ -103,9 +103,15 @@ quotes and punctuation allow one. Longer input matches win globally; ties use in
 then canonical UTF-8 spelling. Exact canonical matches make no replacement entry.
 
 The pass repeats until unchanged, up to eight passes, with a final convergence check. Output growth is
-limited to 1,048,576 UTF-16 units beyond the input and wall-clock execution is bounded to
-`CorrectionMatcher.defaultTimeBudget` (`50 ms`); exceeding the growth budget stops before applying that pass,
-and exceeding the time budget aborts immediately and returns raw `text` (`timedOut == true`) so paste stays fast.
+limited to 1,048,576 UTF-16 units beyond the input. The default thread-CPU budget is
+`CorrectionMatcher.defaultTimeBudget` (`50 ms`) plus `10 ms` per complete 1,000 input UTF-16 units;
+scheduler preemption does not consume it. Explicit `timeBudget` overrides this scaling (`nil` disables
+the CPU deadline). Candidate collection is capped at 32,768 per pass, retaining shorter alternatives
+needed by global longest-match selection. Trie traversal, candidate collection, sort comparisons,
+range selection, pass construction and merged-range reporting poll the deadline cooperatively.
+Exceeding the growth budget stops before applying that pass. Reaching the candidate cap or observing
+an expired CPU deadline discards all work and returns raw `text` (`timedOut == true`). This bounds
+matcher work, not elapsed wall time: scheduling and individual allocation/string operations can delay return.
 `converged == false` reports an unfinished correction at any limit; idempotence is guaranteed only
 when converged. Chained edits merge overlapping original ranges, retaining the original substring, final
 replacement and last applied term UUID. Ranges are UTF-16 offsets in the original input; adjacent chains
@@ -118,7 +124,9 @@ and `DictationHistory` delivery to `DictationDelivery` in `VoiceAppCore`, saving
 or load (for example due to a held lock), `UserDictionary` logs the cause, displays the status and retry state
 in **Settings → Dictionary**, keeps dictation pasting raw text immediately, and retries loading automatically with
 backoff as well as on the next dictation or manual Retry. **Settings → Dictionary** lists terms, flags any legacy
-entries exceeding `DictionaryTerm.maximumLength`, supports adding and editing canonical text and comma-separated aliases,
+entries exceeding `DictionaryTerm.maximumLength` in characters or Unicode scalars. Oversized canonical text
+skips the whole entry; oversized aliases alone skip only those aliases, as stated by the row badge and banner.
+Settings supports adding and editing canonical text and comma-separated aliases,
 reports dropped self-matching aliases, deletes with confirmation, searches when 8 or more terms exist,
 and displays store validation errors in plain English. Number formatting, acoustic boosting, and sync remain
 separate.

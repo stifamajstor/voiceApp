@@ -205,8 +205,16 @@ private struct DictionarySection: View {
         }
     }
 
-    private var oversizedCount: Int {
-        dictionary.oversizedTerms.count
+    private var lengthWarning: String? {
+        let entries = dictionary.oversizedTerms.filter(\.hasOversizedText).count
+        let aliases = dictionary.oversizedTerms.filter { !$0.hasOversizedText }
+            .reduce(0) { $0 + $1.oversizedAliases.count }
+        var skipped: [String] = []
+        if entries > 0 { skipped.append("\(entries) whole \(entries == 1 ? "entry" : "entries")") }
+        if aliases > 0 { skipped.append("\(aliases) \(aliases == 1 ? "alias" : "aliases")") }
+        guard !skipped.isEmpty else { return nil }
+        return "Skipped during dictation: " + skipped.joined(separator: "; ")
+            + ". Limit: \(DictionaryTerm.maximumLength) characters and Unicode scalars per value."
     }
 
     private var summaryText: String {
@@ -285,9 +293,9 @@ private struct DictionarySection: View {
                     .font(.callout)
             }
 
-            if oversizedCount > 0 {
+            if let lengthWarning {
                 Label(
-                    "\(oversizedCount) \(oversizedCount == 1 ? "entry exceeds" : "entries exceed") \(DictionaryTerm.maximumLength) characters and \(oversizedCount == 1 ? "is" : "are") skipped during dictation.",
+                    lengthWarning,
                     systemImage: "exclamationmark.triangle"
                 )
                 .foregroundStyle(Theme.warning)
@@ -325,7 +333,7 @@ private struct DictionarySection: View {
         } header: {
             SectionTitle("Dictionary")
         } footer: {
-            Text("Terms and aliases (up to \(DictionaryTerm.maximumLength) characters each) match whole words case-insensitively before pasting and are stored locally.")
+            Text("Terms and aliases (up to \(DictionaryTerm.maximumLength) characters and Unicode scalars each) match whole words case-insensitively before pasting and are stored locally.")
                 .font(.caption)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -382,7 +390,9 @@ private struct DictionarySection: View {
                 }
                 if term.exceedsLengthLimit {
                     Label(
-                        "Exceeds \(DictionaryTerm.maximumLength) characters — skipped during dictation.",
+                        term.hasOversizedText
+                            ? "Term exceeds the length limit — whole entry skipped during dictation."
+                            : "\(term.oversizedAliases.count) oversized \(term.oversizedAliases.count == 1 ? "alias" : "aliases") skipped; term and other aliases still apply.",
                         systemImage: "exclamationmark.triangle"
                     )
                     .font(.caption)
@@ -468,7 +478,7 @@ private struct DictionarySection: View {
                         .foregroundStyle(Theme.textSecondary)
                     TextField("e.g. MEC, Meg", text: $aliasesText)
                         .textFieldStyle(.roundedBorder)
-                    Text("Optional, up to \(DictionaryTerm.maximumLength) characters each. Duplicate or blank aliases are ignored.")
+                    Text("Optional, up to \(DictionaryTerm.maximumLength) characters and Unicode scalars each. Duplicate or blank aliases are ignored.")
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
                 }

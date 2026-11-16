@@ -157,12 +157,15 @@ case-insensitively using an in-memory matcher rebuilt only when the dictionary c
 correction adds no store I/O to dictation or paste. Voice notes use the same correction before saving,
 keeping both the raw transcript and corrected text without pasting.
 
-Term text and aliases are limited to **100 characters** each (after trimming edge whitespace).
+Term text and aliases are limited to **100 characters and 100 Unicode scalars** each (after trimming edge whitespace).
 Longer entries, duplicate terms, and conflicting aliases are rejected with plain-English messages;
-pre-existing longer rows in SQLite remain visible and flagged in Settings while skipped by the matcher.
+pre-existing longer rows in SQLite remain visible and flagged in Settings. Oversized term text skips the
+whole entry; oversized aliases alone skip only those aliases.
 Blank and duplicate aliases within a term are collapsed, and aliases matching the term's own text are
-dropped with a note. The matcher also enforces a **50 ms** wall-clock budget per dictation, falling
-back to the raw transcript and logging if exceeded. Deleting a term asks for confirmation. When the
+dropped with a note. The matcher uses a thread-CPU budget of **50 ms plus 10 ms per 1,000 input
+UTF-16 units**, so scheduling delays do not consume it. Deadline checks run throughout matching and
+sorting, and each pass is capped at 32,768 candidates. Reaching a work or CPU-time limit discards all
+corrections and logs a raw-transcript fallback. Deleting a term asks for confirmation. When the
 dictionary has 8 or more terms, a search field filters by term or alias.
 
 Terms are stored locally in the same `~/Library/Application Support/VoiceApp/store/store.sqlite`
