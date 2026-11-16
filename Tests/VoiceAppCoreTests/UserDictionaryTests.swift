@@ -25,109 +25,203 @@ final class UserDictionaryTests: XCTestCase {
         let repository = SQLiteHistoryRepository(directory: directory)
         let history = DictationHistory(repository: repository, defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
         await history.start().value
         await dictionary.start().value
 
-        try await dictionary.addTerm(text: "Mac", aliases: ["MEC", "Meg"])
-        let rawText = "this MEC is fast"
-        let corrected = dictionary.correct(rawText)
-        XCTAssertEqual(corrected.text, "this Mac is fast")
+        try await dictionary.addTerm(text: " Mac ", aliases: UserDictionary.parseAliases(" MEC , , Meg\n"))
 
-        let dictation = CompletedDictation(
-            rawText: rawText,
-            finalText: corrected.text,
+        var pasted: [String] = []
+        let deliveredEmpty = try await delivery.deliver(
+            rawText: " [BLANK_AUDIO] ",
+            appBundleID: "com.apple.TextEdit",
+            appName: "TextEdit",
+            modelID: "parakeet-tdt-0.6b-v3",
+            durationSeconds: 0.5
+        ) { pasted.append($0) }
+        XCTAssertFalse(deliveredEmpty)
+        XCTAssertTrue(pasted.isEmpty)
+
+        let delivered = try await delivery.deliver(
+            rawText: "  this MEC is fast  ",
             appBundleID: "com.apple.TextEdit",
             appName: "TextEdit",
             modelID: "parakeet-tdt-0.6b-v3",
             durationSeconds: 1.5
-        )
-        var pasted: String?
-        await history.deliver(dictation) { text in
-            pasted = text
-        }
-        XCTAssertEqual(pasted, "this Mac is fast")
+        ) { pasted.append($0) }
+        XCTAssertTrue(delivered)
+        XCTAssertEqual(pasted, ["this Mac is fast"])
         await history.pendingSave?.value
 
         let store = try MemoryStore(directory: directory)
         defer { try? store.close() }
         let saved = try XCTUnwrap(store.listRecent(kind: .dictation, limit: 1).first)
-        XCTAssertEqual(saved.rawText, "this MEC is fast")
+        XCTAssertEqual(saved.rawText, "  this MEC is fast  ")
         XCTAssertEqual(saved.finalText, "this Mac is fast")
         XCTAssertEqual(try store.search("MEC").map(\.id), [saved.id])
         XCTAssertEqual(try store.search("Mac").map(\.id), [saved.id])
     }
 
     func testEditsAndDeletesTakeEffectOnNextDictationWithoutReadingStore() async throws {
-        let initial = DictionaryTerm(text: "Mac", aliases: ["MEC", "Meg"], deviceID: UUID())
-        let repository = SpyDictionaryRepository(initialTerms: [initial])
+        let seedStore = try MemoryStore(directory: directory)
+        let initial = try seedStore.addTerm(text: "Mac", aliases: ["MEC", "Meg"])
+        try seedStore.close()
+
+        let repository = SpyDictionaryRepository(backing: SQLiteHistoryRepository(directory: directory))
+        let history = DictationHistory(repository: FailingHistoryRepository(), defaults: defaults, log: { _ in })
         let dictionary = UserDictionary(repository: repository)
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
         await dictionary.start().value
 
         let initialReads = await repository.listCount
         XCTAssertEqual(initialReads, 1)
 
-        // Block any future store access to prove correction runs purely in memory.
         await repository.failAllReads(true)
-        XCTAssertEqual(dictionary.correct("this MEC is fast").text, "this Mac is fast")
-        XCTAssertEqual(dictionary.correct("tell Meg hello").text, "tell Mac hello")
+        var pasted: [String] = []
+        _ = try await delivery.deliver(
+            rawText: "this MEC is fast",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "parakeet-tdt-0.6b-v3",
+            durationSeconds: 1.0
+        ) { pasted.append($0) }
+        _ = try await delivery.deliver(
+            rawText: "tell Meg hello",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "parakeet-tdt-0.6b-v3",
+            durationSeconds: 1.0
+        ) { pasted.append($0) }
+        XCTAssertEqual(pasted, ["this Mac is fast", "tell Mac hello"])
         let readsAfterCorrection = await repository.listCount
         XCTAssertEqual(readsAfterCorrection, 1)
 
         await repository.failAllReads(false)
-        let edited = try await dictionary.updateTerm(id: initial.id, text: "MacBook", aliases: ["MEC", "Meg"])
+        let edited = try await dictionary.updateTerm(
+            id: initial.id,
+            text: " MacBook ",
+            aliases: UserDictionary.parseAliases("MEC, , Meg")
+        )
         XCTAssertEqual(edited.text, "MacBook")
-        XCTAssertEqual(dictionary.correct("this MEC is fast").text, "this MacBook is fast")
+        XCTAssertEqual(edited.aliases, ["MEC", "Meg"])
+
+        await repository.failAllReads(true)
+        var afterEdit: String?
+        _ = try await delivery.deliver(
+            rawText: "this MEC is fast",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "parakeet-tdt-0.6b-v3",
+            durationSeconds: 1.0
+        ) { afterEdit = $0 }
+        XCTAssertEqual(afterEdit, "this MacBook is fast")
 
         try await dictionary.deleteTerm(id: initial.id)
-        XCTAssertEqual(dictionary.correct("this MEC is fast").text, "this MEC is fast")
+        var afterDelete: String?
+        _ = try await delivery.deliver(
+            rawText: "this MEC is fast",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "parakeet-tdt-0.6b-v3",
+            durationSeconds: 1.0
+        ) { afterDelete = $0 }
+        XCTAssertEqual(afterDelete, "this MEC is fast")
         XCTAssertTrue(dictionary.terms.isEmpty)
         let finalReads = await repository.listCount
         XCTAssertEqual(finalReads, 1)
     }
 
-    func testStoreFailureStillPastesRawTextAndLogsReason() async {
-        let repository = SpyDictionaryRepository(initialTerms: [])
+    func testStoreFailureStillPastesRawTextAndLogsReason() async throws {
+        let repository = SpyDictionaryRepository(backing: SQLiteHistoryRepository(directory: directory))
         await repository.failOpen(DictionaryLoadFailure())
         var logs: [String] = []
         let dictionary = UserDictionary(repository: repository, log: { logs.append($0) })
         let history = DictationHistory(repository: FailingHistoryRepository(), defaults: defaults, log: { _ in })
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
 
         await dictionary.start().value
         XCTAssertNotNil(dictionary.storeError)
         XCTAssertEqual(logs.count, 1)
         XCTAssertTrue(logs[0].contains("Disk unreadable"))
 
-        let raw = "this MEC is fast"
-        let corrected = dictionary.correct(raw)
-        let dictation = CompletedDictation(
-            rawText: raw,
-            finalText: corrected.text,
+        var pasted: String?
+        let delivered = try await delivery.deliver(
+            rawText: "this MEC is fast",
             appBundleID: nil,
             appName: nil,
             modelID: "parakeet-tdt-0.6b-v3",
             durationSeconds: 1.0
-        )
-        var pasted: String?
-        await history.deliver(dictation) { pasted = $0 }
+        ) { pasted = $0 }
+        XCTAssertTrue(delivered)
         XCTAssertEqual(pasted, "this MEC is fast")
     }
 
-    func testSlowLoadDoesNotBlockCorrectionAndAppliesOnceFinished() async {
-        let term = DictionaryTerm(text: "Mac", aliases: ["MEC"], deviceID: UUID())
-        let repository = SpyDictionaryRepository(initialTerms: [term])
-        let gate = DictionaryGate()
-        await repository.setOpenGate(gate)
-        let dictionary = UserDictionary(repository: repository)
+    func testSlowDictionaryAndHistoryStoresNeverBlockPaste() async throws {
+        let seedStore = try MemoryStore(directory: directory)
+        _ = try seedStore.addTerm(text: "Mac", aliases: ["MEC"])
+        try seedStore.close()
 
-        let loading = dictionary.start()
-        await fulfillment(of: [gate.entered], timeout: 2)
+        let dictionaryRepo = SpyDictionaryRepository(backing: SQLiteHistoryRepository(directory: directory))
+        let historyRepo = GatedHistoryRepository()
+        let dictionaryGate = DictionaryGate()
+        let historyGate = DictionaryGate()
+        await dictionaryRepo.setOpenGate(dictionaryGate)
+        await historyRepo.setOpenGate(historyGate)
+        addTeardownBlock {
+            await dictionaryGate.release()
+            await historyGate.release()
+        }
+
+        let dictionary = UserDictionary(repository: dictionaryRepo)
+        let history = DictationHistory(repository: historyRepo, defaults: defaults)
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
+
+        let historyLoading = history.start()
+        let dictionaryLoading = dictionary.start()
+        await fulfillment(of: [dictionaryGate.entered, historyGate.entered], timeout: 2)
         XCTAssertTrue(dictionary.isLoading)
-        XCTAssertEqual(dictionary.correct("this MEC is fast").text, "this MEC is fast")
 
-        await gate.release()
-        await loading.value
+        var pastedWhileLoading: String?
+        let pasteDuringLoad = expectation(description: "Paste completes while stores are opening")
+        let firstDelivery = Task {
+            _ = try await delivery.deliver(
+                rawText: "this MEC is fast",
+                appBundleID: nil,
+                appName: nil,
+                modelID: "parakeet-tdt-0.6b-v3",
+                durationSeconds: 1.0
+            ) { pastedWhileLoading = $0 }
+            pasteDuringLoad.fulfill()
+        }
+        await fulfillment(of: [pasteDuringLoad], timeout: 1.0)
+        XCTAssertEqual(pastedWhileLoading, "this MEC is fast")
+
+        await dictionaryGate.release()
+        _ = try await firstDelivery.value
+        await dictionaryLoading.value
         XCTAssertFalse(dictionary.isLoading)
-        XCTAssertEqual(dictionary.correct("this MEC is fast").text, "this Mac is fast")
+
+        var pastedWhileHistoryBlocked: String?
+        let pasteDuringHistory = expectation(description: "Paste completes while history store is blocked")
+        let secondDelivery = Task {
+            _ = try await delivery.deliver(
+                rawText: "this MEC is fast",
+                appBundleID: nil,
+                appName: nil,
+                modelID: "parakeet-tdt-0.6b-v3",
+                durationSeconds: 1.0
+            ) { pastedWhileHistoryBlocked = $0 }
+            pasteDuringHistory.fulfill()
+        }
+        await fulfillment(of: [pasteDuringHistory], timeout: 1.0)
+        XCTAssertEqual(pastedWhileHistoryBlocked, "this Mac is fast")
+
+        await historyGate.release()
+        _ = try await secondDelivery.value
+        await historyLoading.value
+        await history.pendingSave?.value
+        let saved = await historyRepo.saved
+        XCTAssertEqual(saved.map(\.finalText), ["this MEC is fast", "this Mac is fast"])
     }
 
     func testValidationErrorsProducePlainEnglishMessages() async throws {
@@ -194,14 +288,14 @@ private actor DictionaryGate {
 }
 
 private actor SpyDictionaryRepository: DictionaryRepository {
-    private var terms: [UUID: DictionaryTerm]
+    private let backing: SQLiteHistoryRepository
     private var openFailure: Error?
     private var blockReads = false
     private var openGate: DictionaryGate?
     var listCount = 0
 
-    init(initialTerms: [DictionaryTerm]) {
-        terms = Dictionary(uniqueKeysWithValues: initialTerms.map { ($0.id, $0) })
+    init(backing: SQLiteHistoryRepository) {
+        self.backing = backing
     }
 
     func failOpen(_ error: Error) { openFailure = error }
@@ -211,31 +305,60 @@ private actor SpyDictionaryRepository: DictionaryRepository {
     func open() async throws {
         await openGate?.enter()
         if let openFailure { throw openFailure }
+        try await backing.open()
     }
 
     func listTerms() async throws -> [DictionaryTerm] {
         if blockReads { throw DictionaryLoadFailure() }
         listCount += 1
-        return Array(terms.values)
+        return try await backing.listTerms()
     }
 
     func addTerm(text: String, aliases: [String]) async throws -> DictionaryTerm {
-        let term = DictionaryTerm(text: text, aliases: aliases, deviceID: UUID())
-        terms[term.id] = term
-        return term
+        try await backing.addTerm(text: text, aliases: aliases)
     }
 
     func updateTerm(id: UUID, text: String, aliases: [String]) async throws -> DictionaryTerm {
-        guard var term = terms[id] else { throw DictionaryError.termNotFound(id) }
-        term.text = text
-        term.aliases = aliases
-        terms[id] = term
-        return term
+        try await backing.updateTerm(id: id, text: text, aliases: aliases)
     }
 
     func deleteTerm(id: UUID) async throws {
-        terms.removeValue(forKey: id)
+        try await backing.deleteTerm(id: id)
     }
+}
+
+private actor GatedHistoryRepository: HistoryRepository {
+    private var openGate: DictionaryGate?
+    var saved: [CompletedDictation] = []
+
+    func setOpenGate(_ gate: DictionaryGate?) { openGate = gate }
+
+    func open() async throws {
+        await openGate?.enter()
+    }
+
+    func append(_ dictation: CompletedDictation) async throws -> MemoryRecord {
+        saved.append(dictation)
+        return MemoryRecord(
+            id: dictation.id,
+            deviceID: UUID(),
+            kind: .dictation,
+            createdAt: dictation.createdAt,
+            rawText: dictation.rawText,
+            finalText: dictation.finalText,
+            appBundleID: dictation.appBundleID,
+            appName: dictation.appName,
+            project: nil,
+            modelID: dictation.modelID,
+            durationSeconds: dictation.durationSeconds,
+            audioPath: nil,
+            deletedAt: nil
+        )
+    }
+
+    func records(query: String, limit: Int) async throws -> [MemoryRecord] { [] }
+    func delete(ids: [UUID]) async throws {}
+    func deleteAll() async throws {}
 }
 
 private struct FailingHistoryRepository: HistoryRepository {

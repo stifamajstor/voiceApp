@@ -43,7 +43,7 @@ final class TextCorrectionPerformanceTests: XCTestCase {
                         reusedTimes.append(Double(reusedElapsed.seconds) * 1_000 + Double(reusedElapsed.attoseconds) / 1e15)
                         XCTAssertEqual(reusedResult, result)
                     }
-                    print("DICTIONARY BENCH terms=\(count) aliases=2 words=\(words) mode=\(capped ? "eight-pass" : "fixed-point") rebuild_median_ms=\(String(format: "%.3f", times.sorted()[10])) reused_median_ms=\(String(format: "%.3f", reusedTimes.sorted()[10]))")
+                    print("DICTIONARY BENCH terms=\(count) aliases=2 words=\(words) mode=\(capped ? "eight-pass" : "fixed-point") rebuild_median_ms=\(String(format: "%.3f", times.sorted()[10])) rebuild_worst_ms=\(String(format: "%.3f", times.max() ?? 0)) reused_median_ms=\(String(format: "%.3f", reusedTimes.sorted()[10])) reused_worst_ms=\(String(format: "%.3f", reusedTimes.max() ?? 0))")
                 }
             }
         }
@@ -59,7 +59,7 @@ final class TextCorrectionPerformanceTests: XCTestCase {
             longTimes.append(Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
             XCTAssertTrue(result.converged)
         }
-        print("DICTIONARY BENCH REUSED terms=500 aliases=2 words=1200 mode=fixed-point reused_median_ms=\(String(format: "%.3f", longTimes.sorted()[10]))")
+        print("DICTIONARY BENCH REUSED terms=500 aliases=2 words=1200 mode=fixed-point reused_median_ms=\(String(format: "%.3f", longTimes.sorted()[10])) reused_worst_ms=\(String(format: "%.3f", longTimes.max() ?? 0))")
     }
 
     private func dictionary(count: Int) -> [DictionaryTerm] {

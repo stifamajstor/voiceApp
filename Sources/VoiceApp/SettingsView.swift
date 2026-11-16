@@ -384,9 +384,10 @@ private struct DictionarySection: View {
         }
 
         private func save() {
+            guard !isSaving else { return }
             isSaving = true
             errorMessage = nil
-            let aliases = aliasesText.components(separatedBy: CharacterSet(charactersIn: ",\n"))
+            let aliases = UserDictionary.parseAliases(aliasesText)
             Task {
                 defer { isSaving = false }
                 do {

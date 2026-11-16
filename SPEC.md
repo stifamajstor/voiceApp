@@ -105,9 +105,10 @@ replacement and last applied term UUID. Ranges are UTF-16 offsets in the origina
 stay separate unless a later edit joins them. Bytes outside those ranges are preserved exactly.
 
 `App.swift` shares one `SQLiteHistoryRepository` between `DictationHistory` and `UserDictionary`.
-`DictationController` applies `dictionary.correct(_:)` synchronously before pasting, and saves both the
-raw transcript (`rawText`) and corrected text (`finalText`) in `CompletedDictation`. If the dictionary
-store fails to open or load, `UserDictionary` logs the cause, displays an error in **Settings → Dictionary**,
+`DictationController` delegates non-speech filtering, synchronous `dictionary.correct(_:)` correction,
+and `DictationHistory` delivery to `DictationDelivery` in `VoiceAppCore`, saving both the raw transcript
+(`rawText`) and corrected text (`finalText`) in `CompletedDictation`. If the dictionary store fails to open
+or load, `UserDictionary` logs the cause, displays an error in **Settings → Dictionary**,
 and leaves dictation pasting raw text. **Settings → Dictionary** lists terms, supports adding and editing
 canonical text and comma-separated aliases, deletes with confirmation, searches when 8 or more terms exist,
 and displays store validation errors in plain English. Number formatting, acoustic boosting, and sync remain

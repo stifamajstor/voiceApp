@@ -126,6 +126,10 @@ public final class UserDictionary: ObservableObject {
         return matcherGeneration
     }
 
+    public static func parseAliases(_ raw: String) -> [String] {
+        raw.components(separatedBy: CharacterSet(charactersIn: ",\n"))
+    }
+
     private static func buildMatcher(for terms: [DictionaryTerm]) async -> CorrectionMatcher {
         if terms.isEmpty { return .empty }
         return await Task.detached(priority: .userInitiated) {
