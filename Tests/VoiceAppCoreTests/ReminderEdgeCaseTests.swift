@@ -554,6 +554,22 @@ final class ReminderEdgeCaseTests: XCTestCase {
         XCTAssertEqual(try store.note(id: id)?.reminder, .idle, "marking undone does not bring the reminder back")
     }
 
+    func testADueTimeSavedWithoutAPhaseIsStillScheduledAndCanMoveOn() async throws {
+        let store = try MemoryStore(directory: directory)
+        let id = try store.append(kind: .note, rawText: "no phase").id
+        let due = start.addingTimeInterval(600)
+        try store.setNoteReminder(id: id, date: due)
+        try store.close()
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        try await database.write { try $0.execute(sql: "UPDATE noteState SET reminderPhase = NULL") }
+        try database.close()
+        let reopened = try MemoryStore(directory: directory)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.note(id: id)?.reminder, .scheduled(dueAt: due))
+        XCTAssertTrue(try reopened.transitionNoteReminder(id: id, from: .scheduled(dueAt: due), to: .handedToMacOS(dueAt: due)))
+        XCTAssertEqual(try reopened.note(id: id)?.reminder, .handedToMacOS(dueAt: due))
+    }
+
     // MARK: Triggers
 
     func testSubSecondDueTimeNeverFiresEarlyAndNearDueTimeStillFires() throws {

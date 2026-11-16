@@ -216,11 +216,13 @@ public final class MemoryStore: Sendable {
     }
 
     /// Saves `to` only if the note is still in state `from`. Returns whether it was saved.
+    /// A due time without a phase reads as scheduled here, as it does in `ReminderState(dueAt:phase:)`.
     public func transitionNoteReminder(id: UUID, from: ReminderState, to: ReminderState) throws -> Bool {
         try database.write { db in
             try db.execute(sql: """
                 UPDATE noteState SET reminderDate = ?, reminderPhase = ?
-                WHERE recordID = ? AND reminderDate IS ? AND reminderPhase IS ?
+                WHERE recordID = ? AND reminderDate IS ?
+                    AND COALESCE(reminderPhase, 'scheduled') IS COALESCE(?, 'scheduled')
                 """, arguments: [to.dueAt?.timeIntervalSince1970, to.phase, id.uuidString,
                                  from.dueAt?.timeIntervalSince1970, from.phase])
             return db.changesCount == 1
