@@ -9,12 +9,13 @@ public protocol NoteReminderService {
 }
 
 public enum ReminderError: LocalizedError {
-    case accessDenied, noDefaultList
+    case accessDenied, noDefaultList, cleanupFailed
 
     public var errorDescription: String? {
         switch self {
         case .accessDenied: return "Reminders access is denied. Enable VoiceApp in System Settings → Privacy & Security → Reminders, then try again."
         case .noDefaultList: return "No default Reminders list is available. Create a list in Apple Reminders, then try again."
+        case .cleanupFailed: return "Could not save the reminder link or remove the new reminder. Remove it in Apple Reminders before trying again."
         }
     }
 }

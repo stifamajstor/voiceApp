@@ -430,8 +430,7 @@ public final class DictationHistory: ObservableObject {
             } catch {
                 do { try self.reminders.remove(identifier: identifier) }
                 catch {
-                    throw NSError(domain: "VoiceApp.Reminders", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                        "Could not save the reminder link or remove the new reminder. Remove it in Apple Reminders before trying again."])
+                    throw ReminderError.cleanupFailed
                 }
                 throw error
             }
@@ -492,7 +491,9 @@ public final class DictationHistory: ObservableObject {
                 if isDeletion { noteDeleteError = nil }
                 await refreshNotes()
             } catch {
-                let message = "Could not update notes: \(error.localizedDescription)"
+                let message = error is NoteError || error is ReminderError
+                    ? error.localizedDescription
+                    : "Could not update notes. Try again. The cause is in the log."
                 failure = message
                 if isDeletion { deleteFailures += 1; noteDeleteError = message }
                 else { noteError = message }
