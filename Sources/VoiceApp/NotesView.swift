@@ -25,56 +25,75 @@ struct NotesView: View {
                     .foregroundStyle(Theme.warning)
                     .textSelection(.enabled)
             }
+            Toggle("Only notes with reminders", isOn: $history.remindersOnly)
             if history.reminderAccessDenied {
-                Button("Open Reminders Privacy Settings") {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")!)
+                Text("Notifications are off for VoiceApp. Reminders stay in Notes and show as overdue when due. Enable VoiceApp in System Settings → Notifications.")
+                    .foregroundStyle(Theme.warning)
+                Button("Open VoiceApp Notification Settings") {
+                    let bundleID = Bundle.main.bundleIdentifier ?? "com.local.voiceapp"
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)")!)
                 }
             }
-            List {
-                ForEach(history.notes) { note in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(note.record.createdAt, format: .dateTime.year().month().day().hour().minute())
-                            if let app = note.record.appName { Text("· \(app)") }
-                            Spacer()
-                            if note.isDone { Label("Done", systemImage: "checkmark.circle.fill") }
-                        }
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        Text(note.text)
-                            .strikethrough(note.isDone)
-                            .foregroundStyle(note.isDone ? Theme.textSecondary : Theme.textPrimary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        HStack {
-                            Button("Copy") { TextInserter.copy(note.text) }
-                            Button("Edit…") { editing = note }
-                            Button(note.isDone ? "Mark not done" : "Mark done") {
-                                history.setNoteDone(id: note.id, isDone: !note.isDone)
+            if let error = history.notificationError {
+                Text(error).foregroundStyle(Theme.warning)
+            }
+            if history.reminderAccessDenied || history.notificationError != nil {
+                Button("Refresh notifications") { Task { await history.reconcileReminders().value } }
+            }
+            ScrollViewReader { proxy in
+                List(selection: $history.focusedNoteID) {
+                    ForEach(history.notes) { note in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(note.record.createdAt, format: .dateTime.year().month().day().hour().minute())
+                                if let app = note.record.appName { Text("· \(app)") }
+                                Spacer()
+                                if note.isDone { Label("Done", systemImage: "checkmark.circle.fill") }
                             }
-                            Spacer()
-                            if note.reminderID != nil {
-                                Button("Undo reminder") { history.undoNoteReminder(id: note.id) }
-                            } else {
-                                Button("Remind me…") { reminding = note }
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                            Text(note.text)
+                                .strikethrough(note.isDone)
+                                .foregroundStyle(note.isDone ? Theme.textSecondary : Theme.textPrimary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            HStack {
+                                Button("Copy") { TextInserter.copy(note.text) }
+                                Button("Edit…") { editing = note }
+                                Button(note.isDone ? "Mark not done" : "Mark done") {
+                                    history.setNoteDone(id: note.id, isDone: !note.isDone)
+                                }
+                                Spacer()
+                                if note.reminderDate != nil {
+                                    Button("Remove reminder") { history.removeNoteReminder(id: note.id) }
+                                } else {
+                                    Button("Remind me…") { reminding = note }.disabled(note.isDone)
+                                }
+                                Button("Delete…", role: .destructive) { history.requestDeleteNote(note) }
                             }
-                            Button("Delete…", role: .destructive) { history.requestDeleteNote(note) }
+                            .disabled(history.pendingNoteOperations > 0)
+                            .buttonStyle(NeonButtonStyle())
+                            if let date = note.reminderDate {
+                                TimelineView(.periodic(from: .now, by: 1)) { context in
+                                    Label("\(note.isOverdue(at: context.date) ? "Overdue" : "Due"): \(date.formatted(date: .abbreviated, time: .shortened))", systemImage: "bell")
+                                        .font(.caption)
+                                        .foregroundStyle(note.isOverdue(at: context.date) ? Theme.warning : Theme.neon)
+                                }
+                            }
                         }
-                        .disabled(history.pendingNoteOperations > 0)
-                        .buttonStyle(NeonButtonStyle())
-                        if let date = note.reminderDate {
-                            Label("Reminder: \(date.formatted(date: .abbreviated, time: .shortened))", systemImage: "bell")
-                                .font(.caption)
-                                .foregroundStyle(Theme.neon)
-                        }
+                        .padding(.vertical, 8)
+                        .tag(note.id)
+                        .id(note.id)
                     }
-                    .padding(.vertical, 8)
                 }
-            }
-            .overlay {
-                if history.notes.isEmpty && !history.isOpening && !history.isSearchingNotes {
-                    ContentUnavailableView(history.noteQuery.isEmpty ? "No notes yet" : "No matching notes",
-                        systemImage: "note.text", description: Text("Set a note shortcut in Settings, then speak a thought."))
+                .overlay {
+                    if history.notes.isEmpty && !history.isOpening && !history.isSearchingNotes {
+                        ContentUnavailableView(history.noteQuery.isEmpty ? "No notes yet" : "No matching notes",
+                            systemImage: "note.text", description: Text("Set a note shortcut in Settings, then speak a thought."))
+                    }
+                }
+                .onChange(of: history.focusedNoteID) { _, id in
+                    if let id { proxy.scrollTo(id, anchor: .center) }
                 }
             }
             HStack {
@@ -110,7 +129,7 @@ struct NotesView: View {
             Button("Cancel", role: .cancel) { history.cancelDeleteNote() }
             Button("Delete", role: .destructive) { history.confirmDeleteNote() }
         } message: {
-            Text("This permanently deletes the note and removes its linked Apple Reminder, if any. This cannot be undone.")
+            Text("This permanently deletes the note and its reminder. This cannot be undone.")
         }
     }
 }
@@ -162,12 +181,12 @@ private struct NoteReminderPicker: View {
             Text("Remind me…").font(.headline)
             Text(note.text).lineLimit(3)
             DatePicker("Date and time", selection: $date, displayedComponents: [.date, .hourAndMinute])
-            Text("Creates an Apple Reminder in your default list. You can undo it from this note.")
+            Text("Saves a reminder in VoiceApp and schedules a VoiceApp notification.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Create reminder") { save(date); dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Set reminder") { save(date); dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(20).frame(width: 500)
@@ -180,6 +199,11 @@ final class NotesWindowController: ObservableObject {
     private var window: NSWindow?
 
     init(history: DictationHistory) { self.history = history }
+
+    func reveal(noteID: UUID) {
+        show()
+        Task { await history.openNote(id: noteID) }
+    }
 
     func show() {
         if window == nil {

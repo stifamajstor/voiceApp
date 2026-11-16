@@ -21,6 +21,7 @@ public final class DictationHistory: ObservableObject {
     @Published public private(set) var hasMoreNotes = false
     @Published public var noteQuery = "" {
         didSet {
+            focusedNoteID = nil
             noteLimit = Self.pageSize
             searchNotes(debounced: true)
         }
@@ -31,7 +32,13 @@ public final class DictationHistory: ObservableObject {
     private var noteSearchGeneration = 0
     private var pendingNoteSearch: Task<Void, Never>?
     private var noteFeedbackTask: Task<Void, Never>?
-    private let reminders: any NoteReminderService
+    private let reminders: NoteReminderScheduler
+    private let now: () -> Date
+    @Published public private(set) var notificationError: String?
+    @Published public var focusedNoteID: UUID?
+    @Published public var remindersOnly = false {
+        didSet { focusedNoteID = nil; noteLimit = Self.pageSize; searchNotes(debounced: false) }
+    }
 
     public static let saveEnabledKey = "saveDictationHistory"
     @Published public var saveEnabled: Bool {
@@ -103,13 +110,14 @@ public final class DictationHistory: ObservableObject {
     private var resultLimit = pageSize
 
     public init(repository: any HistoryRepository = SQLiteHistoryRepository(),
-                reminders: (any NoteReminderService)? = nil, defaults: UserDefaults = .standard,
+                notifications: (any NoteNotificationCenter)? = nil, now: @escaping () -> Date = { .now }, defaults: UserDefaults = .standard,
                 debounce: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
                 log: @escaping (String) -> Void = {
                     Logger(subsystem: "com.local.voiceapp", category: "History").error("\($0, privacy: .private)")
                 }) {
         self.repository = repository
-        self.reminders = reminders ?? EventKitNoteReminders()
+        self.reminders = NoteReminderScheduler(center: notifications ?? SystemNoteNotificationCenter())
+        self.now = now
         self.defaults = defaults
         self.debounce = debounce
         self.log = log
@@ -123,6 +131,7 @@ public final class DictationHistory: ObservableObject {
             do {
                 try await repository.open()
                 storedCount = try await repository.count()
+                await restoreReminderNotifications()
                 isOpening = false
                 await refreshRecent()
             } catch {
@@ -363,6 +372,7 @@ public final class DictationHistory: ObservableObject {
         noteSearchGeneration += 1
         let generation = noteSearchGeneration
         let query = noteQuery
+        let remindersOnly = remindersOnly
         let limit = noteLimit
         isSearchingNotes = true
         pendingNoteSearch = Task {
@@ -371,9 +381,15 @@ public final class DictationHistory: ObservableObject {
                 if debounced { try await debounce(.milliseconds(250)) }
                 await start().value
                 guard !Task.isCancelled, generation == noteSearchGeneration, storeError == nil else { return }
-                let result = try await repository.notes(query: query, limit: limit + 1)
+                let result = try await repository.notes(query: query, remindersOnly: remindersOnly, limit: limit + 1)
                 guard !Task.isCancelled, generation == noteSearchGeneration else { return }
-                notes = Array(result.prefix(limit))
+                var visible = Array(result.prefix(limit))
+                if query.isEmpty, !remindersOnly, let id = focusedNoteID,
+                   !visible.contains(where: { $0.id == id }), let focused = try await repository.note(id: id) {
+                    visible.append(focused)
+                }
+                guard !Task.isCancelled, generation == noteSearchGeneration else { return }
+                notes = visible
                 hasMoreNotes = result.count > limit
                 noteSearchError = nil
             } catch {
@@ -388,12 +404,18 @@ public final class DictationHistory: ObservableObject {
 
     @discardableResult
     public func editNote(id: UUID, text: String, completion: ((String?) -> Void)? = nil) -> Task<Void, Never> {
-        enqueueNoteOperation(completion: completion) { try await self.repository.editNote(id: id, text: text) }
+        enqueueNoteOperation(completion: completion) {
+            try await self.repository.editNote(id: id, text: text)
+            await self.updateNotification(id: id)
+        }
     }
 
     @discardableResult
     public func setNoteDone(id: UUID, isDone: Bool) -> Task<Void, Never> {
-        enqueueNoteOperation { try await self.repository.setNoteDone(id: id, isDone: isDone) }
+        enqueueNoteOperation {
+            try await self.repository.setNoteDone(id: id, isDone: isDone)
+            await self.updateNotification(id: id)
+        }
     }
 
     public func requestDeleteNote(_ note: VoiceNote) {
@@ -410,11 +432,8 @@ public final class DictationHistory: ObservableObject {
         guard let note = noteToDelete else { return nil }
         cancelDeleteNote()
         return enqueueNoteOperation(isDeletion: true) {
-            if let identifier = try await self.currentNote(id: note.id).reminderID {
-                try await self.requireReminderAccess()
-                try self.reminders.remove(identifier: identifier)
-            }
             try await self.repository.delete(ids: [note.id])
+            self.reminders.remove(id: note.id)
         }
     }
 
@@ -422,28 +441,67 @@ public final class DictationHistory: ObservableObject {
     public func remindNote(id: UUID, date: Date) -> Task<Void, Never> {
         enqueueNoteOperation {
             let note = try await self.currentNote(id: id)
-            guard note.reminderID == nil else { return }
-            try await self.requireReminderAccess()
-            let identifier = try self.reminders.create(title: note.text, date: date)
-            do {
-                try await self.repository.setNoteReminder(id: id, identifier: identifier, date: date)
-            } catch {
-                do { try self.reminders.remove(identifier: identifier) }
-                catch {
-                    throw ReminderError.cleanupFailed
-                }
-                throw error
-            }
+            guard !note.isDone else { return }
+            try await self.repository.setNoteReminder(id: id, date: date)
+            await self.updateNotification(id: id, requestAuthorization: true, catchUp: true)
         }
     }
 
     @discardableResult
-    public func undoNoteReminder(id: UUID) -> Task<Void, Never> {
+    public func removeNoteReminder(id: UUID) -> Task<Void, Never> {
         enqueueNoteOperation {
-            guard let identifier = try await self.currentNote(id: id).reminderID else { return }
-            try await self.requireReminderAccess()
-            try self.reminders.remove(identifier: identifier)
-            try await self.repository.setNoteReminder(id: id, identifier: nil, date: nil)
+            try await self.repository.setNoteReminder(id: id, date: nil)
+            self.reminders.remove(id: id)
+        }
+    }
+
+    public func openNote(id: UUID) async {
+        noteQuery = ""
+        remindersOnly = false
+        await refreshNotes()
+        if !notes.contains(where: { $0.id == id }), let note = try? await repository.note(id: id) {
+            notes.append(note)
+        }
+        focusedNoteID = id
+    }
+
+    @discardableResult
+    public func reconcileReminders() -> Task<Void, Never> {
+        enqueueNoteOperation { await self.restoreReminderNotifications() }
+    }
+
+    private func restoreReminderNotifications() async {
+        do {
+            let notes = try await repository.notes(query: "", limit: .max)
+            await reminders.removeOrphans(notes: notes)
+            notificationError = nil
+            reminderAccessDenied = false
+            var failure: String?
+            for note in notes where !note.isDone && note.reminderDate != nil {
+                await updateNotification(id: note.id, catchUp: true)
+                failure = failure ?? notificationError
+            }
+            notificationError = failure
+        } catch {
+            notificationError = "Could not restore reminder notifications. Your reminders remain in Notes. Try refreshing notifications."
+            log("Could not reconcile reminder notifications: \(error.localizedDescription)")
+        }
+    }
+
+    private func updateNotification(id: UUID, requestAuthorization: Bool = false, catchUp: Bool = false) async {
+        do {
+            let note = try await currentNote(id: id)
+            guard !note.isDone, note.reminderDate != nil else { reminders.remove(id: id); return }
+            let allowed = try await reminders.authorization(requestIfNeeded: requestAuthorization)
+            reminderAccessDenied = !allowed
+            guard allowed else { return }
+            notificationError = nil
+            if try await reminders.schedule(note, now: now(), catchUp: catchUp) {
+                try await repository.markNoteReminderNotified(id: id, at: now())
+            }
+        } catch {
+            notificationError = "The reminder is saved in Notes, but its notification could not be scheduled. Try refreshing notifications."
+            log("Could not schedule reminder notification: \(error.localizedDescription)")
         }
     }
 
@@ -451,14 +509,6 @@ public final class DictationHistory: ObservableObject {
         guard let note = try await repository.note(id: id)
         else { throw NoteError.notFound }
         return note
-    }
-
-    private func requireReminderAccess() async throws {
-        guard try await reminders.requestAccess() else {
-            reminderAccessDenied = true
-            throw ReminderError.accessDenied
-        }
-        reminderAccessDenied = false
     }
 
     @discardableResult
@@ -491,7 +541,7 @@ public final class DictationHistory: ObservableObject {
                 if isDeletion { noteDeleteError = nil }
                 await refreshNotes()
             } catch {
-                let message = error is NoteError || error is ReminderError
+                let message = error is NoteError
                     ? error.localizedDescription
                     : "Could not update notes. Try again. The cause is in the log."
                 failure = message

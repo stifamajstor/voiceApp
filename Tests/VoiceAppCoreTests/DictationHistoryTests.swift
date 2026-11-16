@@ -25,7 +25,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testDeliverySavesSnapshotAfterPasteAndSurvivesRelaunch() async throws {
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         let result = sample()
         var pasted: String?
@@ -45,7 +45,7 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertEqual(saved.modelID, "selected-model")
         XCTAssertEqual(saved.durationSeconds, 2.5)
         XCTAssertNil(saved.audioPath)
-        let relaunched = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), defaults: defaults)
+        let relaunched = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), notifications: FakeNotifications(), defaults: defaults)
         await relaunched.start().value
         XCTAssertEqual(relaunched.recent.map(\.text), [result.finalText])
     }
@@ -55,7 +55,7 @@ final class DictationHistoryTests: XCTestCase {
         try store.append(rawText: "stored")
         try store.close()
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         XCTAssertTrue(history.saveEnabled)
         history.saveEnabled = false
         await history.start().value
@@ -66,7 +66,7 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertTrue(pasted)
         XCTAssertEqual(try records().map(\.rawText), ["stored"])
         XCTAssertEqual(history.recent.count, 1)
-        let relaunched = DictationHistory(repository: repository, defaults: defaults)
+        let relaunched = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         XCTAssertFalse(relaunched.saveEnabled)
     }
 
@@ -74,7 +74,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         await repository.failOpen(TestFailure())
         var logs: [String] = []
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { logs.append($0) })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { logs.append($0) })
         await history.start().value
         XCTAssertEqual(history.storeError, "Could not open dictation history. History is not being saved; dictation still works. The cause is in the log.")
         XCTAssertTrue(logs.contains { $0.contains("SELECT * FROM records") })
@@ -91,7 +91,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setOpenGate(gate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let opening = history.start()
         await fulfillment(of: [gate.entered], timeout: 2)
         var pasted = false
@@ -110,7 +110,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setSaveGate(gate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         var pasted: [String] = []
         await history.deliver(sample("first")) { pasted.append($0) }
@@ -127,7 +127,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setSaveGate(gate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.deliver(sample()) { _ in }
         await fulfillment(of: [gate.entered], timeout: 2)
@@ -140,7 +140,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testEnablingHistoryDuringPasteDoesNotSaveAPrivateDictation() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         history.saveEnabled = false
         await history.start().value
         await history.deliver(sample()) { _ in history.saveEnabled = true }
@@ -153,7 +153,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         await repository.failSave()
         var logs: [String] = []
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { logs.append($0) })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { logs.append($0) })
         await history.start().value
         var pasted = false
         await history.deliver(sample()) { _ in pasted = true }
@@ -166,7 +166,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testMenuDisclosureTracksSaveFailureAndRecovery() async {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         await history.start().value
         let savedDisclosure = history.savingDisclosure
         await repository.failSave()
@@ -184,7 +184,7 @@ final class DictationHistoryTests: XCTestCase {
     func testOnlyOpenTimeoutOffersRelaunch() async {
         let repository = ControlledRepository()
         await repository.failOpen(MemoryStore.StoreError.migrationLockTimeout)
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         await history.start().value
         XCTAssertEqual(history.storeError,
                        "Opening dictation history timed out. History is not being saved; dictation still works. The cause is in the log. Relaunch VoiceApp to try opening it again.")
@@ -192,7 +192,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testClipboardFallbackStillRetainsSuccessfulTranscription() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         do {
             try await history.deliver(sample()) { _ in throw TestFailure() }
@@ -205,7 +205,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testMenuClearDoesNotDeleteStoredRecordsOrResurrectThemOnRefresh() async throws {
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         for index in 0..<5 {
             await history.deliver(sample("entry \(index)")) { _ in }
@@ -233,7 +233,7 @@ final class DictationHistoryTests: XCTestCase {
         let noDelete = expectation(description: "Clear recent never requests any repository delete")
         noDelete.isInverted = true
         await repository.observeDeletes { noDelete.fulfill() }
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         let saveGate = Suspension()
         await repository.setSaveGate(saveGate)
@@ -267,7 +267,7 @@ final class DictationHistoryTests: XCTestCase {
         let tie = try store.append(createdAt: newer.createdAt, rawText: "hello worldly")
         _ = try store.append(rawText: "hellos world")
         try store.close()
-        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), defaults: defaults,
+        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), notifications: FakeNotifications(), defaults: defaults,
                                        debounce: { _ in })
         await history.start().value
         history.query = "hello wor"
@@ -282,7 +282,7 @@ final class DictationHistoryTests: XCTestCase {
     func testSearchDebouncesAndDiscardsStaleResults() async throws {
         let repository = ControlledRepository()
         let debounce = Suspension()
-        let history = DictationHistory(repository: repository, defaults: defaults, debounce: { _ in await debounce.enter() })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, debounce: { _ in await debounce.enter() })
         await history.start().value
         await repository.resetQueries()
         history.query = "first"
@@ -302,7 +302,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setSearchGate(gate)
-        let history = DictationHistory(repository: repository, defaults: defaults, debounce: { _ in })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, debounce: { _ in })
         await history.start().value
         history.query = "old"
         await fulfillment(of: [gate.entered], timeout: 2)
@@ -319,7 +319,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testSelectedDeleteUsesOneBatchAndKeepsBusyUntilCompletion() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.refresh()
         let selected = Set(history.results.map(\.id))
@@ -346,7 +346,7 @@ final class DictationHistoryTests: XCTestCase {
     func testFailedDeleteRetainsResultsSelectionAndCanRetry() async throws {
         let repository = ControlledRepository()
         var logs: [String] = []
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { logs.append($0) })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { logs.append($0) })
         await history.start().value
         await history.refresh()
         history.selection = [try XCTUnwrap(history.results.first).id]
@@ -372,7 +372,7 @@ final class DictationHistoryTests: XCTestCase {
         for index in 0..<105 { try store.append(rawText: "entry \(index)") }
         let note = try store.append(kind: .note, rawText: "keep note")
         try store.close()
-        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), defaults: defaults,
+        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), notifications: FakeNotifications(), defaults: defaults,
                                        debounce: { _ in })
         await history.start().value
         await history.refresh()
@@ -405,7 +405,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testSearchCompletionDoesNotHideDeleteFailure() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults, debounce: { _ in })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, debounce: { _ in })
         await history.start().value
         await history.refresh()
         history.selection = [try XCTUnwrap(history.results.first).id]
@@ -424,7 +424,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testLockedStoreSaveDoesNotDelayPasteOrMainActor() async throws {
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         var configuration = Configuration()
         configuration.allowsUnsafeTransactions = true
@@ -449,7 +449,7 @@ final class DictationHistoryTests: XCTestCase {
     func testSearchFailureClearsBusyAndReportsError() async throws {
         let repository = ControlledRepository()
         var logs: [String] = []
-        let history = DictationHistory(repository: repository, defaults: defaults, debounce: { _ in }, log: { logs.append($0) })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, debounce: { _ in }, log: { logs.append($0) })
         await history.start().value
         await repository.failSearch()
         history.query = "failure"
@@ -470,7 +470,7 @@ final class DictationHistoryTests: XCTestCase {
 
     private func assertDeleteOrdering(all: Bool) async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.refresh()
         history.selection = Set(history.results.map(\.id))
@@ -514,7 +514,7 @@ final class DictationHistoryTests: XCTestCase {
     }
 
     func testDeletingPersistedDictationRemovesItFromMenu() async throws {
-        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), defaults: defaults)
+        let history = DictationHistory(repository: SQLiteHistoryRepository(directory: directory), notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.deliver(sample("delete me")) { _ in }
         await history.pendingSave?.value
@@ -530,7 +530,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testDisablingDuringPasteKeepsAcceptedDictationAndRejectsLaterOnes() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.deliver(sample("accepted")) { _ in history.saveEnabled = false }
         await history.deliver(sample("private")) { _ in }
@@ -540,7 +540,7 @@ final class DictationHistoryTests: XCTestCase {
     }
 
     func testTerminationWithEmptyQueueIsImmediate() async {
-        let history = DictationHistory(repository: ControlledRepository(), defaults: defaults)
+        let history = DictationHistory(repository: ControlledRepository(), notifications: FakeNotifications(), defaults: defaults)
         let termination = HistoryTermination(history: history, showHistory: { XCTFail("No failure") },
                                              waitForDeadline: { _ in XCTFail("No deadline needed") })
         XCTAssertTrue(termination.requestTermination { _ in XCTFail("Immediate quit needs no reply") })
@@ -551,7 +551,7 @@ final class DictationHistoryTests: XCTestCase {
         let deleteGate = Suspension()
         await repository.setDeleteGate(deleteGate)
         await repository.failDelete(true)
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         await history.start().value
         history.requestDeleteAll()
         let deletion = history.confirmDeleteAll()
@@ -588,7 +588,7 @@ final class DictationHistoryTests: XCTestCase {
     func testOldDeleteFailureDoesNotCancelLaterQuitWithSaveInFlight() async {
         let repository = ControlledRepository()
         await repository.failDelete(true)
-        let history = DictationHistory(repository: repository, defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         await history.start().value
         history.requestDeleteAll()
         await history.confirmDeleteAll()?.value
@@ -612,7 +612,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testTerminationWaitsForEntireSaveTailAndIgnoresCancelledDeadline() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         let recentGate = Suspension()
         let deadline = Suspension()
@@ -644,7 +644,7 @@ final class DictationHistoryTests: XCTestCase {
         let repository = ControlledRepository()
         let gate = Suspension()
         await repository.setSaveGate(gate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.deliver(sample("first")) { _ in }
         await fulfillment(of: [gate.entered], timeout: 2)
@@ -676,7 +676,7 @@ final class DictationHistoryTests: XCTestCase {
         let saveGate = Suspension()
         await repository.setDeleteGate(deletionGate)
         await repository.setSaveGate(saveGate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         history.requestDeleteAll()
         let deletion = history.confirmDeleteAll()
@@ -706,7 +706,7 @@ final class DictationHistoryTests: XCTestCase {
         let saveGate = Suspension()
         let deadline = Suspension()
         await repository.setSaveGate(saveGate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.deliver(sample()) { _ in }
         await fulfillment(of: [saveGate.entered], timeout: 2)
@@ -745,7 +745,7 @@ final class DictationHistoryTests: XCTestCase {
         let deadline = Suspension()
         await repository.failDelete(true)
         await repository.setSaveGate(saveGate)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         history.requestDeleteAll()
         let deletion = history.confirmDeleteAll()
@@ -779,7 +779,7 @@ final class DictationHistoryTests: XCTestCase {
 
     private func assertTerminationWaits(deleteFails: Bool) async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         var historyShown = 0
         var replies: [Bool] = []
@@ -812,7 +812,7 @@ final class DictationHistoryTests: XCTestCase {
 
     func testSelectedDeletionRequiresConfirmationAndCancelKeepsRecords() async throws {
         let repository = ControlledRepository()
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         await history.start().value
         await history.refresh()
         history.selection = [try XCTUnwrap(history.results.first).id]
@@ -876,10 +876,11 @@ private actor Suspension {
 
 private actor ControlledRepository: HistoryRepository {
     func appendNote(_ note: CompletedDictation) async throws { throw CocoaError(.featureUnsupported) }
-    func notes(query: String, limit: Int) async throws -> [VoiceNote] { throw CocoaError(.featureUnsupported) }
+    func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote] { [] }
     func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
-    func setNoteReminder(id: UUID, identifier: String?, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
+    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
 
     var events: [String] = []
     var writes: [CompletedDictation] = []

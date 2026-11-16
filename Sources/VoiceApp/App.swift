@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import VoiceAppCore
+import UserNotifications
 
 @main
 struct VoiceApp: App {
@@ -27,8 +28,6 @@ struct VoiceApp: App {
         _historyWindow = StateObject(wrappedValue: historyWindow)
         let notesWindow = NotesWindowController(history: history)
         _notesWindow = StateObject(wrappedValue: notesWindow)
-        history.start()
-        dictionary.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
         let termination = HistoryTermination(history: history, showHistory: {
@@ -36,6 +35,10 @@ struct VoiceApp: App {
         })
         _termination = StateObject(wrappedValue: termination)
         appDelegate.termination = termination
+        appDelegate.notesWindow = notesWindow
+        UNUserNotificationCenter.current().delegate = appDelegate
+        history.start()
+        dictionary.start()
         // Register hotkeys once the app has finished launching and the run loop is up.
         Task { @MainActor in dictation.start() }
     }
@@ -115,7 +118,18 @@ struct MenuBarIcon: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    var notesWindow: NotesWindowController?
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+              let id = NoteNotification.noteID(for: response.notification.request.identifier) else { return }
+        await MainActor.run { self.notesWindow?.reveal(noteID: id) }
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
     var termination: HistoryTermination?
 
     func requestMenuQuit() {

@@ -5,8 +5,12 @@ public struct VoiceNote: Identifiable, Equatable, Sendable {
     public let record: MemoryRecord
     public let text: String
     public let isDone: Bool
-    public let reminderID: String?
     public let reminderDate: Date?
+    public let reminderNotifiedAt: Date?
+
+    public func isOverdue(at date: Date) -> Bool {
+        !isDone && reminderDate.map { $0 <= date } == true
+    }
 }
 
 public enum CaptureTrigger: Sendable {

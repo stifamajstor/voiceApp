@@ -202,18 +202,24 @@ against these contracts exactly.
 - The Notes window lists notes newest first, searches current edited text (last word prefix),
   paginates, copies, edits, marks done/undone, and confirms deletion.
 - Original `.note` records remain immutable. `noteState` holds current text, done state,
-  and reminder identifier/date; FTS indexes current text. Deletion removes this state and its index,
+  and reminder due date/catch-up timestamp; FTS indexes current text. Deletion removes this state and its index,
   and scrubs the original record into a tombstone. Editing preserves the original transcript locally.
 - Notes reuse `DictationHistory`, its ordered write tail, `SQLiteHistoryRepository`, and
   `HistoryTermination`. Note saves ignore the dictation-history opt-out. Save success flashes a
   menu-bar checkmark; failures appear in Notes and the menu. Capture never waits for store I/O.
-- Remind me is manual: pick date and time, request EventKit full reminders access only on use,
-  create in the user's default reminders list, persist identifier/date, and offer Undo reminder.
-  Due components carry the local time zone and an absolute alarm carries the selected time.
-  Denial shows recovery text and a System Settings button. Missing default lists show an error.
-  Undo is idempotent if the user removed the reminder elsewhere. Deleting a linked note also
-  removes its reminder, requires access, and keeps the note if removal fails.
-- Edits and done state apply to the note only; they do not modify Apple Reminders.
-  A failed reminder-link save attempts to remove the newly created reminder. A process crash
-  between EventKit and SQLite commits can leave an unlinked reminder; there is no cross-store transaction.
-- No automatic date detection, calendar events, sync, or cloud model. Follow issue #3's last scope comment.
+- Remind me is manual: pick date and time, save `noteState.reminderDate`, then schedule a
+  VoiceApp notification through UserNotifications. Notes and reminders live only inside VoiceApp;
+  no other app receives them. No external-app integration or automatic date detection is included.
+- `NoteReminderScheduler` uses a `NoteNotificationCenter` protocol. Notification IDs derive from
+  note UUIDs; future requests replace rather than accumulate. Authorization is requested only when
+  setting a reminder, never at launch. Denial keeps the due date and exposes notification settings.
+- Launch reconciliation removes orphan requests, reschedules future reminders, and posts an immediate
+  notification for overdue notes without a `reminderNotifiedAt` timestamp. It records catch-up delivery
+  in the store to suppress repeat launches; already-delivered notifications are not alerted again.
+- Notes show due/overdue state live and support a reminder-only filter. Notification clicks clear
+  search/filter state, load the target even outside the first page, and select/reveal it in Notes.
+- Edits replace pending notification text. Remove reminder, done, and delete cancel pending and
+  delivered notifications. Marking done also clears the stored reminder; marking undone does not restore it.
+- Store writes precede notification effects. Notification failure leaves the reminder in Notes with
+  retry advice. Launch repairs interrupted scheduling; a crash between catch-up notification and its
+  timestamp commit can repeat an alert. OS notification settings and Focus can suppress visible alerts.

@@ -32,13 +32,17 @@ public protocol HistoryRepository: Sendable {
     func deleteAll() async throws
     func appendNote(_ note: CompletedDictation) async throws
     func note(id: UUID) async throws -> VoiceNote?
-    func notes(query: String, limit: Int) async throws -> [VoiceNote]
+    func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote]
     func editNote(id: UUID, text: String) async throws
     func setNoteDone(id: UUID, isDone: Bool) async throws
-    func setNoteReminder(id: UUID, identifier: String?, date: Date?) async throws
+    func setNoteReminder(id: UUID, date: Date?) async throws
+    func markNoteReminderNotified(id: UUID, at date: Date) async throws
 }
 
 extension HistoryRepository {
+    public func notes(query: String, limit: Int) async throws -> [VoiceNote] {
+        try await notes(query: query, remindersOnly: false, limit: limit)
+    }
     public func note(id: UUID) async throws -> VoiceNote? {
         try await notes(query: "", limit: .max).first { $0.id == id }
     }
@@ -121,14 +125,18 @@ public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
 
     public func note(id: UUID) async throws -> VoiceNote? { try availableStore().note(id: id) }
 
-    public func notes(query: String, limit: Int) async throws -> [VoiceNote] {
-        try availableStore().notes(query: query, limit: limit)
+    public func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote] {
+        try availableStore().notes(query: query, remindersOnly: remindersOnly, limit: limit)
     }
 
     public func editNote(id: UUID, text: String) async throws { try availableStore().editNote(id: id, text: text) }
     public func setNoteDone(id: UUID, isDone: Bool) async throws { try availableStore().setNoteDone(id: id, isDone: isDone) }
-    public func setNoteReminder(id: UUID, identifier: String?, date: Date?) async throws {
-        try availableStore().setNoteReminder(id: id, identifier: identifier, date: date)
+    public func setNoteReminder(id: UUID, date: Date?) async throws {
+        try availableStore().setNoteReminder(id: id, date: date)
+    }
+
+    public func markNoteReminderNotified(id: UUID, at date: Date) async throws {
+        try availableStore().markNoteReminderNotified(id: id, at: date)
     }
 
     private func availableStore() throws -> MemoryStore {

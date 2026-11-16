@@ -8,7 +8,7 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Clipboard restoration after automatic paste, with a manual-paste fallback.
 - Local dictation history with search, copy, and deletion.
 - Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
-- Voice notes with separate shortcuts, editing, done state, and manual Apple Reminders.
+- Voice notes with separate shortcuts, editing, done state, and in-app reminders.
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -103,7 +103,7 @@ Audio capture and speech inference run on your Mac. VoiceApp does not upload rec
 |---|---|
 | Microphone | Record audio while dictation is active |
 | Accessibility | Send the paste keystroke and observe modifier-only shortcuts globally |
-| Reminders (requested on use) | Create and remove reminders you manually link to notes |
+| Notifications (requested on first reminder) | Show VoiceApp reminders when due |
 
 Automatic paste temporarily places the transcript on the system clipboard. VoiceApp restores the previous clipboard contents after about **0.5 seconds**, unless another app or you changed the clipboard in the meantime. It marks automatic-paste entries as transient for clipboard managers that honor `org.nspasteboard.TransientType`; other managers may retain them.
 
@@ -166,15 +166,22 @@ Use **Notes…** in the menu to find voice notes. Configure **Note — push to t
 when dictation history is off, and never pasted or placed on the clipboard automatically.
 
 Notes show the app active when recording began. Search, copy, edit, mark done, or delete with
-confirmation. **Remind me…** lets you choose a date and time for an Apple Reminder in your
-default list. **Undo reminder** removes that reminder. Deleting a note also removes its linked
-reminder; if removal fails, the note is kept. Reminders access is requested only for
-these actions; denied access offers a link to System Settings. No dates are detected automatically.
+confirmation. **Remind me…** stores a date and time on the note and schedules VoiceApp's own
+macOS notification. Clicking it opens that note. **Remove reminder**, marking done, and deletion
+cancel the notification. Editing updates its text. Notes show due/overdue dates and can filter to
+notes with reminders. No dates are detected automatically. Notes and reminders stay inside VoiceApp.
+
+Notification permission is requested only when you first set a reminder. If denied, the reminder
+stays in Notes with a link to VoiceApp's notification settings. After enabling notifications, use
+**Refresh notifications**. Notification previews may show note text according to macOS settings.
 
 The original transcript stays immutable. A local `noteState` side table holds current edited text,
-done state, and the reminder identifier/date. Note deletion scrubs both the transcript and side
-state, retaining only the record tombstone. Notes share the history store actor and ordered write
-queue, including quit draining. Edits and done state do not update an already-created Apple Reminder.
+done state, due date, and a catch-up notification timestamp. Note deletion scrubs both the transcript
+and side state, retaining only the record tombstone. Notes share the history store actor and ordered
+write queue, including quit draining. Future notifications are restored on launch using a stable ID
+per note. Missed reminders stay overdue and get one catch-up notification, recorded to avoid repeats.
+SQLite and the notification service cannot commit atomically; launch reconciliation repairs pending
+requests after interruption. A crash between catch-up delivery and its timestamp save can repeat an alert.
 
 ## Troubleshooting
 

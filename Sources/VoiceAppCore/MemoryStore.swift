@@ -148,15 +148,15 @@ public final class MemoryStore: Sendable {
         }
     }
 
-    public func notes(query: String = "", limit: Int = 100) throws -> [VoiceNote] {
-        try fetchNotes(query: query, limit: limit, id: nil)
+    public func notes(query: String = "", remindersOnly: Bool = false, limit: Int = 100) throws -> [VoiceNote] {
+        try fetchNotes(query: query, remindersOnly: remindersOnly, limit: limit, id: nil)
     }
 
     public func note(id: UUID) throws -> VoiceNote? {
-        try fetchNotes(query: "", limit: 1, id: id).first
+        try fetchNotes(query: "", remindersOnly: false, limit: 1, id: id).first
     }
 
-    private func fetchNotes(query: String, limit: Int, id: UUID?) throws -> [VoiceNote] {
+    private func fetchNotes(query: String, remindersOnly: Bool, limit: Int, id: UUID?) throws -> [VoiceNote] {
         guard limit > 0 else { return [] }
         return try database.read { db in
             let tokens = try db.makeTokenizer(.unicode61()).tokenize(query: query)
@@ -166,18 +166,19 @@ public final class MemoryStore: Sendable {
             if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && tokens.isEmpty { return [] }
             let rows = try Row.fetchAll(db, sql: """
                 SELECT records.*, noteState.text AS noteText, noteState.isDone,
-                    noteState.reminderID, noteState.reminderDate
+                    noteState.reminderNotifiedAt, noteState.reminderDate
                 FROM records JOIN noteState ON noteState.recordID = records.id
                 WHERE records.deletedAt IS NULL AND records.kind = 'note'
                     AND (? IS NULL OR records.id = ?)
+                    AND (? = 0 OR noteState.reminderDate IS NOT NULL)
                     AND (? = '' OR noteState.rowid IN
                         (SELECT rowid FROM notesFTS WHERE notesFTS MATCH ?))
                 ORDER BY records.createdAt DESC, records.rowid DESC LIMIT ?
-                """, arguments: [id?.uuidString, id?.uuidString, pattern, pattern.isEmpty ? "\"\"" : pattern, limit])
+                """, arguments: [id?.uuidString, id?.uuidString, remindersOnly, pattern, pattern.isEmpty ? "\"\"" : pattern, limit])
             return try rows.map { row in
                 VoiceNote(record: try MemoryRecord(row: row), text: row["noteText"], isDone: row["isDone"],
-                    reminderID: row["reminderID"],
-                    reminderDate: (row["reminderDate"] as Double?).map(Date.init(timeIntervalSince1970:)))
+                    reminderDate: (row["reminderDate"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                    reminderNotifiedAt: (row["reminderNotifiedAt"] as Double?).map(Date.init(timeIntervalSince1970:)))
             }
         }
     }
@@ -188,12 +189,21 @@ public final class MemoryStore: Sendable {
     }
 
     public func setNoteDone(id: UUID, isDone: Bool) throws {
-        try updateNote(id: id, sql: "UPDATE noteState SET isDone = ? WHERE recordID = ?", values: [isDone])
+        try updateNote(id: id, sql: """
+            UPDATE noteState SET isDone = ?,
+                reminderDate = CASE WHEN ? THEN NULL ELSE reminderDate END,
+                reminderNotifiedAt = CASE WHEN ? THEN NULL ELSE reminderNotifiedAt END WHERE recordID = ?
+            """, values: [isDone, isDone, isDone])
     }
 
-    public func setNoteReminder(id: UUID, identifier: String?, date: Date?) throws {
-        try updateNote(id: id, sql: "UPDATE noteState SET reminderID = ?, reminderDate = ? WHERE recordID = ?",
-                       values: [identifier, date?.timeIntervalSince1970])
+    public func setNoteReminder(id: UUID, date: Date?) throws {
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderDate = ?, reminderNotifiedAt = NULL WHERE recordID = ?",
+                       values: [date?.timeIntervalSince1970])
+    }
+
+    public func markNoteReminderNotified(id: UUID, at date: Date) throws {
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderNotifiedAt = ? WHERE recordID = ?",
+                       values: [date.timeIntervalSince1970])
     }
 
     private func updateNote(id: UUID, sql: String, values: [(any DatabaseValueConvertible)?]) throws {
@@ -464,6 +474,37 @@ public final class MemoryStore: Sendable {
                 );
                 INSERT INTO noteState (recordID, text)
                     SELECT id, finalText FROM records WHERE kind = 'note' AND deletedAt IS NULL;
+                CREATE TRIGGER notes_insert AFTER INSERT ON records WHEN NEW.kind = 'note'
+                BEGIN INSERT INTO noteState (recordID, text) VALUES (NEW.id, NEW.finalText); END;
+                CREATE TRIGGER notes_delete AFTER UPDATE ON records WHEN NEW.deletedAt IS NOT NULL
+                BEGIN DELETE FROM noteState WHERE recordID = NEW.id; END;
+                """)
+            try db.create(virtualTable: "notesFTS", using: FTS5()) { table in
+                table.synchronize(withTable: "noteState")
+                table.tokenizer = .unicode61()
+                table.column("text")
+            }
+        }
+        migrator.registerMigration("notes.localReminders") { db in
+            let triggers = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'noteState'")
+            for trigger in triggers {
+                try db.execute(sql: "DROP TRIGGER \(trigger.quotedDatabaseIdentifier)")
+            }
+            try db.execute(sql: """
+                DROP TABLE notesFTS;
+                DROP TRIGGER notes_insert;
+                DROP TRIGGER notes_delete;
+                ALTER TABLE noteState RENAME TO previousNoteState;
+                CREATE TABLE noteState (
+                    recordID TEXT PRIMARY KEY NOT NULL REFERENCES records(id),
+                    text TEXT NOT NULL,
+                    isDone INTEGER NOT NULL DEFAULT 0 CHECK (isDone IN (0, 1)),
+                    reminderDate REAL,
+                    reminderNotifiedAt REAL
+                );
+                INSERT INTO noteState (recordID, text, isDone, reminderDate)
+                    SELECT recordID, text, isDone, CASE WHEN isDone THEN NULL ELSE reminderDate END FROM previousNoteState;
+                DROP TABLE previousNoteState;
                 CREATE TRIGGER notes_insert AFTER INSERT ON records WHEN NEW.kind = 'note'
                 BEGIN INSERT INTO noteState (recordID, text) VALUES (NEW.id, NEW.finalText); END;
                 CREATE TRIGGER notes_delete AFTER UPDATE ON records WHEN NEW.deletedAt IS NOT NULL
