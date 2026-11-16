@@ -250,8 +250,9 @@ final class DictationHistoryTests: XCTestCase {
         await history.pendingSave?.value
         await history.pendingSearch?.value
         XCTAssertEqual(history.recent.map(\.text), ["new"])
-        // Observe absence after draining, including untracked delayed background deletes.
-        await fulfillment(of: [noDelete], timeout: 1)
+        // Observe absence after draining, including untracked delayed background deletes
+        // (a delete delayed by 1.5 s must still be caught).
+        await fulfillment(of: [noDelete], timeout: 2)
         let deleteRequests = await repository.deleteRequests
         XCTAssertTrue(deleteRequests.isEmpty)
         let writes = await repository.writes
@@ -381,8 +382,10 @@ final class DictationHistoryTests: XCTestCase {
         XCTAssertEqual(history.results.count, 105)
         XCTAssertEqual(history.deleteAllCount, 105)
         history.requestDeleteAll()
+        XCTAssertTrue(history.isDeleteConfirmationPresented, "Delete all must show its alert")
         XCTAssertEqual(history.deleteConfirmationTitle, "Delete 105 dictations?")
         history.cancelDeleteAll()
+        XCTAssertFalse(history.isDeleteConfirmationPresented)
         history.query = "entry 1"
         await history.pendingSearch?.value
         await history.confirmDeleteAll()?.value
