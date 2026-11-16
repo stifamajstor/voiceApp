@@ -12,6 +12,7 @@ struct MenuBarView: View {
     @EnvironmentObject private var history: DictationHistory
     @EnvironmentObject private var termination: HistoryTermination
     let openHistory: () -> Void
+    let quit: () -> Void
     @AppStorage(TextInserter.keepOnClipboardKey) private var keepOnClipboard = false
 
     var body: some View {
@@ -199,7 +200,7 @@ struct MenuBarView: View {
             .disabled(!updater.canCheckForUpdates)
             .help("Check for updates (v\(updater.currentVersion))")
             Spacer()
-            Button("Quit VoiceApp") { termination.requestQuit { NSApp.terminate(nil) } }
+            Button("Quit VoiceApp", action: quit)
                 .disabled(termination.isQuitPending)
                 .keyboardShortcut("q")
         }

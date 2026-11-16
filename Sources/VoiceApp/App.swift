@@ -32,7 +32,7 @@ struct VoiceApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(openHistory: historyWindow.show)
+            MenuBarView(openHistory: historyWindow.show, quit: appDelegate.requestMenuQuit)
                 .environmentObject(modelManager)
                 .environmentObject(dictation)
                 .environmentObject(history)
@@ -103,6 +103,15 @@ struct MenuBarIcon: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var termination: HistoryTermination?
+
+    func requestMenuQuit() {
+        // Let the SwiftUI button action return so the pending menu can repaint.
+        perform(#selector(quitFromMenu), with: nil, afterDelay: 0, inModes: [.common])
+    }
+
+    @objc private func quitFromMenu() {
+        termination?.requestQuit { NSApp.terminate(nil) }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Call NSApp.terminate from an AppKit event, never a main-actor task or main-queue block:
