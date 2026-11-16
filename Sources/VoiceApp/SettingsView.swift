@@ -60,6 +60,11 @@ struct SettingsView: View {
                     ForEach(ModifierKey.allCases) { Text($0.title).tag($0.rawValue) }
                 }
                 KeyboardShortcuts.Recorder("Toggle to talk — key combo", name: .toggleToTalk)
+                KeyboardShortcuts.Recorder("Note — push to talk", name: .notePushToTalk)
+                KeyboardShortcuts.Recorder("Note — toggle", name: .noteToggle)
+                Text("Note shortcuts start unbound. Notes are always saved locally and never pasted.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
                 if pushToTalkModifier == toggleModifier, pushToTalkModifier != ModifierKey.none.rawValue {
                     Label("Both use the same key; it will act as push to talk.", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(Theme.warning)

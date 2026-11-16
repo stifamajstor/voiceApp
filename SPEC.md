@@ -192,3 +192,28 @@ against these contracts exactly.
   (with a brief error state) if `!modelManager.isReady`. Very short recordings (<0.3 s) are dropped.
 - `Resources/Info.plist` (bundle id `com.local.voiceapp`, `LSUIElement`, `NSMicrophoneUsageDescription`,
   min OS 14.0), `scripts/build-app.sh`.
+
+
+## Voice notes and manual reminders (Part of #3)
+
+- Separate configurable `notePushToTalk` and `noteToggle` key combinations start unbound.
+  A recording retains its destination until transcription finishes; other shortcuts cannot end it.
+  Notes record the app active at recording start and never call text insertion or mutate the clipboard.
+- The Notes window lists notes newest first, searches current edited text (last word prefix),
+  paginates, copies, edits, marks done/undone, and confirms deletion.
+- Original `.note` records remain immutable. `noteState` holds current text, done state,
+  and reminder identifier/date; FTS indexes current text. Deletion removes this state and its index,
+  and scrubs the original record into a tombstone. Editing preserves the original transcript locally.
+- Notes reuse `DictationHistory`, its ordered write tail, `SQLiteHistoryRepository`, and
+  `HistoryTermination`. Note saves ignore the dictation-history opt-out. Save success flashes a
+  menu-bar checkmark; failures appear in Notes and the menu. Capture never waits for store I/O.
+- Remind me is manual: pick date and time, request EventKit full reminders access only on use,
+  create in the user's default reminders list, persist identifier/date, and offer Undo reminder.
+  Due components carry the local time zone and an absolute alarm carries the selected time.
+  Denial shows recovery text and a System Settings button. Missing default lists show an error.
+  Undo is idempotent if the user removed the reminder elsewhere. Deleting a linked note also
+  removes its reminder, requires access, and keeps the note if removal fails.
+- Edits and done state apply to the note only; they do not modify Apple Reminders.
+  A failed reminder-link save attempts to remove the newly created reminder. A process crash
+  between EventKit and SQLite commits can leave an unlinked reminder; there is no cross-store transaction.
+- No automatic date detection, calendar events, sync, or cloud model. Follow issue #3's last scope comment.

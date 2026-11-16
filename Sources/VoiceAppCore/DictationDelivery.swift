@@ -16,6 +16,7 @@ public final class DictationDelivery {
         appName: String?,
         modelID: String,
         durationSeconds: Double,
+        destination: CaptureDestination = .dictation,
         paste: (String) async throws -> Void
     ) async throws -> Bool {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -32,7 +33,7 @@ public final class DictationDelivery {
             modelID: modelID,
             durationSeconds: durationSeconds
         )
-        try await history.deliver(completed, paste: paste)
+        try await history.deliver(completed, destination: destination, paste: paste)
         return true
     }
 

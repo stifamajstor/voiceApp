@@ -30,9 +30,18 @@ public protocol HistoryRepository: Sendable {
     func count() async throws -> Int
     func delete(ids: [UUID]) async throws
     func deleteAll() async throws
+    func appendNote(_ note: CompletedDictation) async throws
+    func note(id: UUID) async throws -> VoiceNote?
+    func notes(query: String, limit: Int) async throws -> [VoiceNote]
+    func editNote(id: UUID, text: String) async throws
+    func setNoteDone(id: UUID, isDone: Bool) async throws
+    func setNoteReminder(id: UUID, identifier: String?, date: Date?) async throws
 }
 
 extension HistoryRepository {
+    public func note(id: UUID) async throws -> VoiceNote? {
+        try await notes(query: "", limit: .max).first { $0.id == id }
+    }
     public func count() async throws -> Int {
         try await records(query: "", limit: .max).count
     }
@@ -102,6 +111,24 @@ public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
 
     public func deleteTerm(id: UUID) throws {
         try availableStore().deleteTerm(id: id)
+    }
+
+    public func appendNote(_ note: CompletedDictation) async throws {
+        try availableStore().append(id: note.id, kind: .note, createdAt: note.createdAt,
+            rawText: note.rawText, finalText: note.finalText, appBundleID: note.appBundleID,
+            appName: note.appName, modelID: note.modelID, durationSeconds: note.durationSeconds)
+    }
+
+    public func note(id: UUID) async throws -> VoiceNote? { try availableStore().note(id: id) }
+
+    public func notes(query: String, limit: Int) async throws -> [VoiceNote] {
+        try availableStore().notes(query: query, limit: limit)
+    }
+
+    public func editNote(id: UUID, text: String) async throws { try availableStore().editNote(id: id, text: text) }
+    public func setNoteDone(id: UUID, isDone: Bool) async throws { try availableStore().setNoteDone(id: id, isDone: isDone) }
+    public func setNoteReminder(id: UUID, identifier: String?, date: Date?) async throws {
+        try availableStore().setNoteReminder(id: id, identifier: identifier, date: date)
     }
 
     private func availableStore() throws -> MemoryStore {

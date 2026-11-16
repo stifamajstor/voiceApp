@@ -25,6 +25,12 @@ final class HistoryInterfaceTests: XCTestCase {
 }
 
 private struct UnavailableRepository: HistoryRepository {
+    func appendNote(_ note: CompletedDictation) async throws { throw CocoaError(.featureUnsupported) }
+    func notes(query: String, limit: Int) async throws -> [VoiceNote] { throw CocoaError(.featureUnsupported) }
+    func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteReminder(id: UUID, identifier: String?, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
+
     func open() async throws { throw CocoaError(.fileReadNoPermission) }
     func append(_ dictation: CompletedDictation) async throws -> MemoryRecord { throw CocoaError(.fileWriteNoPermission) }
     func records(query: String, limit: Int) async throws -> [MemoryRecord] { [] }

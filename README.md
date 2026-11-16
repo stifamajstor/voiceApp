@@ -8,6 +8,7 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Clipboard restoration after automatic paste, with a manual-paste fallback.
 - Local dictation history with search, copy, and deletion.
 - Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
+- Voice notes with separate shortcuts, editing, done state, and manual Apple Reminders.
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -62,6 +63,8 @@ The first model load can take longer while Core ML prepares it for your Mac. If 
 | Push-to-talk, key combination | ⌥Space | Hold to record; release to transcribe |
 | Toggle-to-talk, key combination | ⌥⇧Space | Press once to start; press again to transcribe |
 | Toggle-to-talk, modifier key | None | Choose a key in Settings if desired |
+| Note — push to talk, key combination | None | Hold to record a note; release to save without pasting |
+| Note — toggle, key combination | None | Press to start a note; press again to save without pasting |
 
 Both the key combinations and modifier keys are configurable in Settings. If ⌥Space conflicts with a launcher, record another combination. Key combinations work without Accessibility permission; single modifier keys require it when used outside VoiceApp.
 
@@ -100,6 +103,7 @@ Audio capture and speech inference run on your Mac. VoiceApp does not upload rec
 |---|---|
 | Microphone | Record audio while dictation is active |
 | Accessibility | Send the paste keystroke and observe modifier-only shortcuts globally |
+| Reminders (requested on use) | Create and remove reminders you manually link to notes |
 
 Automatic paste temporarily places the transcript on the system clipboard. VoiceApp restores the previous clipboard contents after about **0.5 seconds**, unless another app or you changed the clipboard in the meantime. It marks automatic-paste entries as transient for clipboard managers that honor `org.nspasteboard.TransientType`; other managers may retain them.
 
@@ -163,7 +167,8 @@ when dictation history is off, and never pasted or placed on the clipboard autom
 
 Notes show the app active when recording began. Search, copy, edit, mark done, or delete with
 confirmation. **Remind me…** lets you choose a date and time for an Apple Reminder in your
-default list. **Undo reminder** removes that reminder. Reminders access is requested only for
+default list. **Undo reminder** removes that reminder. Deleting a note also removes its linked
+reminder; if removal fails, the note is kept. Reminders access is requested only for
 these actions; denied access offers a link to System Settings. No dates are detected automatically.
 
 The original transcript stays immutable. A local `noteState` side table holds current edited text,

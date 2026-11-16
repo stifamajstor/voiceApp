@@ -12,6 +12,7 @@ struct MenuBarView: View {
     @EnvironmentObject private var history: DictationHistory
     @EnvironmentObject private var termination: HistoryTermination
     let openHistory: () -> Void
+    let openNotes: () -> Void
     let quit: () -> Void
     @AppStorage(TextInserter.keepOnClipboardKey) private var keepOnClipboard = false
 
@@ -20,6 +21,16 @@ struct MenuBarView: View {
             header
             modelSection
             recentSection
+            HStack {
+                Button("Notes…", action: openNotes).buttonStyle(NeonButtonStyle())
+                if let feedback = history.noteFeedback {
+                    Label(feedback, systemImage: "checkmark.circle").font(.caption)
+                }
+                if history.pendingNoteOperations > 0 { ProgressView().controlSize(.small) }
+            }
+            if let error = history.noteDeleteError ?? history.noteError {
+                Text(error).font(.caption).foregroundStyle(Theme.warning)
+            }
             shortcutsSection
             if termination.isQuitPending {
                 Text("Finishing history work before quitting…")

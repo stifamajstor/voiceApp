@@ -2,6 +2,9 @@ import Foundation
 import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
+    static let notePushToTalk = Self("notePushToTalk")
+    static let noteToggle = Self("noteToggle")
+
     /// Hold to record, release to transcribe.
     ///
     /// Defaults are pre-populated only if the user has never set/cleared them (KeyboardShortcuts
@@ -43,16 +46,37 @@ struct KeyPressFilter {
 final class HotkeyManager {
     private var pushToTalkFilter = KeyPressFilter()
     private var toggleFilter = KeyPressFilter()
+    private var notePushFilter = KeyPressFilter()
+    private var noteToggleFilter = KeyPressFilter()
     private var registered = false
 
     /// Idempotent. Callbacks receive de-duplicated events (no key-repeat).
     func register(
         onPushToTalkDown: @escaping () -> Void,
         onPushToTalkUp: @escaping () -> Void,
-        onToggle: @escaping () -> Void
+        onToggle: @escaping () -> Void,
+        onNoteDown: @escaping () -> Void,
+        onNoteUp: @escaping () -> Void,
+        onNoteToggle: @escaping () -> Void
     ) {
         guard !registered else { return }
         registered = true
+
+        KeyboardShortcuts.onKeyDown(for: .notePushToTalk) { [weak self] in
+            guard let self, self.notePushFilter.registerDown() else { return }
+            onNoteDown()
+        }
+        KeyboardShortcuts.onKeyUp(for: .notePushToTalk) { [weak self] in
+            self?.notePushFilter.registerUp()
+            onNoteUp()
+        }
+        KeyboardShortcuts.onKeyDown(for: .noteToggle) { [weak self] in
+            guard let self, self.noteToggleFilter.registerDown() else { return }
+            onNoteToggle()
+        }
+        KeyboardShortcuts.onKeyUp(for: .noteToggle) { [weak self] in
+            self?.noteToggleFilter.registerUp()
+        }
 
         KeyboardShortcuts.onKeyDown(for: .pushToTalk) { [weak self] in
             guard let self, self.pushToTalkFilter.registerDown() else { return }

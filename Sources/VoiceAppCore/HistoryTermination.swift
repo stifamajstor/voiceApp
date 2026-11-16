@@ -11,10 +11,14 @@ public final class HistoryTermination: ObservableObject {
     private(set) var deadline: Task<Void, Never>?
 
     public init(history: DictationHistory, showHistory: @escaping () -> Void = {},
-                waitForDeadline: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+                waitForDeadline: (@Sendable (Duration) async throws -> Void)? = nil) {
         self.history = history
         self.showHistory = showHistory
-        self.waitForDeadline = waitForDeadline
+        self.waitForDeadline = waitForDeadline ?? Self.sleepBeforeDeadline
+    }
+
+    private nonisolated static let sleepBeforeDeadline: @Sendable (Duration) async throws -> Void = { duration in
+        try await Task.sleep(for: duration)
     }
 
     public func requestTermination(reply: @escaping (Bool) -> Void) -> Bool {

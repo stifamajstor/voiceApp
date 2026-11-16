@@ -9,6 +9,7 @@ struct VoiceApp: App {
     @StateObject private var dictation: DictationController
     @StateObject private var history: DictationHistory
     @StateObject private var dictionary: UserDictionary
+    @StateObject private var notesWindow: NotesWindowController
     @StateObject private var historyWindow: HistoryWindowController
     @StateObject private var termination: HistoryTermination
     @StateObject private var updater = Updater()
@@ -24,11 +25,15 @@ struct VoiceApp: App {
         _dictionary = StateObject(wrappedValue: dictionary)
         let historyWindow = HistoryWindowController(history: history)
         _historyWindow = StateObject(wrappedValue: historyWindow)
+        let notesWindow = NotesWindowController(history: history)
+        _notesWindow = StateObject(wrappedValue: notesWindow)
         history.start()
         dictionary.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        let termination = HistoryTermination(history: history, showHistory: historyWindow.show)
+        let termination = HistoryTermination(history: history, showHistory: {
+            if history.noteDeleteError != nil { notesWindow.show() } else { historyWindow.show() }
+        })
         _termination = StateObject(wrappedValue: termination)
         appDelegate.termination = termination
         // Register hotkeys once the app has finished launching and the run loop is up.
@@ -37,14 +42,14 @@ struct VoiceApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(openHistory: historyWindow.show, quit: appDelegate.requestMenuQuit)
+            MenuBarView(openHistory: historyWindow.show, openNotes: notesWindow.show, quit: appDelegate.requestMenuQuit)
                 .environmentObject(modelManager)
                 .environmentObject(dictation)
                 .environmentObject(history)
                 .environmentObject(updater)
                 .environmentObject(termination)
         } label: {
-            MenuBarIcon(dictation: dictation, modelManager: modelManager)
+            MenuBarIcon(dictation: dictation, modelManager: modelManager, history: history)
         }
         .menuBarExtraStyle(.window)
 
@@ -63,6 +68,7 @@ struct VoiceApp: App {
 struct MenuBarIcon: View {
     @ObservedObject var dictation: DictationController
     @ObservedObject var modelManager: ModelManager
+    @ObservedObject var history: DictationHistory
 
     var body: some View {
         switch dictation.state {
@@ -73,7 +79,9 @@ struct MenuBarIcon: View {
         case .error:
             Image(systemName: "exclamationmark.triangle")
         case .idle:
-            if modelManager.loadState == .loading {
+            if history.noteFeedback != nil {
+                Image(systemName: "checkmark.circle").help("Note saved")
+            } else if modelManager.loadState == .loading {
                 Image(systemName: "ellipsis.circle")
             } else {
                 Image(systemName: modelManager.isReady ? "mic" : "mic.slash")
