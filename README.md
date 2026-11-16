@@ -8,6 +8,7 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Clipboard restoration after automatic paste, with a manual-paste fallback.
 - Local dictation history with search, copy, and deletion.
 - Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
+- Voice notes with separate shortcuts, editing, done state, and in-app reminders.
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -62,8 +63,10 @@ The first model load can take longer while Core ML prepares it for your Mac. If 
 | Push-to-talk, key combination | ⌥Space | Hold to record; release to transcribe |
 | Toggle-to-talk, key combination | ⌥⇧Space | Press once to start; press again to transcribe |
 | Toggle-to-talk, modifier key | None | Choose a key in Settings if desired |
+| Note — push to talk, key combination | None | Hold to record a note; release to save without pasting |
+| Note — toggle, key combination | None | Press to start a note; press again to save without pasting |
 
-Both the key combinations and modifier keys are configurable in Settings. If ⌥Space conflicts with a launcher, record another combination. Key combinations work without Accessibility permission; single modifier keys require it when used outside VoiceApp.
+Both the key combinations and modifier keys are configurable in Settings. A key combination already assigned to another recording action is rejected with a message and the previous value is kept. If ⌥Space conflicts with a launcher, record another combination. Key combinations work without Accessibility permission; single modifier keys require it when used outside VoiceApp.
 
 Modifier push-to-talk has a short hold delay. Combining that modifier with another key cancels the recording so ordinary Option-character typing does not produce a transcript. If both modifier actions use the same key, push-to-talk takes precedence.
 
@@ -100,6 +103,7 @@ Audio capture and speech inference run on your Mac. VoiceApp does not upload rec
 |---|---|
 | Microphone | Record audio while dictation is active |
 | Accessibility | Send the paste keystroke and observe modifier-only shortcuts globally |
+| Notifications (requested on first reminder) | Show VoiceApp reminders when due |
 
 Automatic paste temporarily places the transcript on the system clipboard. VoiceApp restores the previous clipboard contents after about **0.5 seconds**, unless another app or you changed the clipboard in the meantime. It marks automatic-paste entries as transient for clipboard managers that honor `org.nspasteboard.TransientType`; other managers may retain them.
 
@@ -121,11 +125,13 @@ Every deletion asks for confirmation with the number of dictations to remove and
 dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
 Search and deletion run in the background with a busy indicator; large deletes can take seconds.
 Quitting from the menu or through macOS application termination (including logout and updater relaunch)
-waits for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While
+waits for an in-flight transcription and its save, plus queued saves and deletes, within one 30-second
+deadline, then proceeds even if work remains. New recordings are ignored while quitting; dictation paste
+may be skipped, but its history save still runs. While
 waiting, the menu says it is finishing history work, disables Quit, and ignores a second menu Quit request.
 A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
-that fails during the wait cancels quitting and brings History forward with the error; dictation and
-paste keep working meanwhile. Force quit, a crash, or a forced system shutdown cannot wait.
+that fails during the wait cancels quitting and brings History forward with the error; new dictations
+can then run again. Force quit, a crash, or a forced system shutdown cannot wait.
 Copy a transcript and paste it into the intended app yourself.
 
 The menu keeps the latest three transcripts across relaunches when history is enabled. **Clear recent**
@@ -143,7 +149,8 @@ and dictation and paste continue. Recent transcripts remain available in memory 
 Add terms and optional comma-separated aliases in **Settings → Dictionary** (for example,
 `Mac` with aliases `MEC, Meg`). Before pasting, VoiceApp replaces matching whole words
 case-insensitively using an in-memory matcher rebuilt only when the dictionary changes, so
-correction adds no store I/O to dictation or paste.
+correction adds no store I/O to dictation or paste. Voice notes use the same correction before saving,
+keeping both the raw transcript and corrected text without pasting.
 
 Leading and trailing whitespace is trimmed from term text and aliases, and blank aliases are
 dropped. Duplicate terms or conflicting aliases are rejected with plain-English messages.
@@ -154,6 +161,41 @@ Terms are stored locally in the same `~/Library/Application Support/VoiceApp/sto
 database as dictation history. History records keep both the raw transcript and the corrected text,
 and history search matches both. If the dictionary cannot be loaded, VoiceApp logs the cause,
 shows a warning in **Settings → Dictionary**, and pastes the raw transcript.
+
+## Voice notes
+
+Use **Notes…** in the menu to find voice notes. Configure **Note — push to talk** or
+**Note — toggle** in Settings → Shortcuts; both start unbound. Notes are saved locally even
+when dictation history is off, and never pasted or placed on the clipboard automatically.
+
+Notes show the app active when recording began. Search, copy, edit, mark done, or delete with
+confirmation. **Remind me…** stores a date and time on the note and schedules VoiceApp's own
+macOS notification. Clicking it opens that note. **Remove reminder**, marking done, and deletion
+cancel the notification. Editing updates its text. Notes show due/overdue dates and can filter to
+notes with reminders. No dates are detected automatically. Notes and reminders stay inside VoiceApp.
+
+Notification permission is requested when you first set a reminder, or when you choose
+**Refresh notifications** if permission has not been asked yet. Launch never asks. Notes distinguishes
+unasked permission from notifications turned off. If denied, the reminder stays in Notes with a link
+to VoiceApp's notification settings. After enabling notifications, use **Refresh notifications**.
+Notification previews may show note text according to macOS settings.
+
+The original transcript stays immutable. A local `noteState` side table holds current edited text,
+done state, due date, successful OS handoff for that due date, and an alerted timestamp. Note deletion
+scrubs both the transcript
+and side state, retaining only the record tombstone. Notes share the history store actor and ordered
+write queue, including quit draining. Future notifications are restored on launch using a stable ID
+per note, using calendar-date triggers in the current time zone, with repeated DST hours disambiguated.
+Time-zone changes reschedule future requests. Only the nearest 60 future reminders are scheduled;
+all others remain in Notes. Delivery and changes refill available slots. At launch, a due reminder
+successfully handed to macOS is treated as delivered, even after a click or Clear All. Only never
+scheduled reminders get a catch-up alert; multiple missed reminders produce one count summary.
+The alerted timestamp prevents repeated catch-ups; reminders remain overdue until removed or done.
+SQLite and the notification service cannot commit atomically; launch reconciliation repairs pending
+requests after interruption. A crash between notification handoff and its timestamp save can repeat
+an alert. Focus and OS settings
+can suppress visible delivery. The first permission dialog currently holds the ordered store queue
+until answered; dictation paste remains independent of that queue.
 
 ## Troubleshooting
 

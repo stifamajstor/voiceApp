@@ -148,6 +148,78 @@ public final class MemoryStore: Sendable {
         }
     }
 
+    public func notes(query: String = "", remindersOnly: Bool = false, limit: Int = 100) throws -> [VoiceNote] {
+        try fetchNotes(query: query, remindersOnly: remindersOnly, limit: limit, id: nil)
+    }
+
+    public func note(id: UUID) throws -> VoiceNote? {
+        try fetchNotes(query: "", remindersOnly: false, limit: 1, id: id).first
+    }
+
+    private func fetchNotes(query: String, remindersOnly: Bool, limit: Int, id: UUID?) throws -> [VoiceNote] {
+        guard limit > 0 else { return [] }
+        return try database.read { db in
+            let tokens = try db.makeTokenizer(.unicode61()).tokenize(query: query)
+            let pattern = tokens.enumerated().map { index, token in
+                "\"" + token.token.replacingOccurrences(of: "\"", with: "\"\"") + "\"" + (index == tokens.count - 1 ? "*" : "")
+            }.joined(separator: " AND ")
+            if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && tokens.isEmpty { return [] }
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT records.*, noteState.text AS noteText, noteState.isDone,
+                    noteState.reminderNotifiedAt, noteState.reminderDate, noteState.reminderScheduledFor
+                FROM records JOIN noteState ON noteState.recordID = records.id
+                WHERE records.deletedAt IS NULL AND records.kind = 'note'
+                    AND (? IS NULL OR records.id = ?)
+                    AND (? = 0 OR noteState.reminderDate IS NOT NULL)
+                    AND (? = '' OR noteState.rowid IN
+                        (SELECT rowid FROM notesFTS WHERE notesFTS MATCH ?))
+                ORDER BY records.createdAt DESC, records.rowid DESC LIMIT ?
+                """, arguments: [id?.uuidString, id?.uuidString, remindersOnly, pattern, pattern.isEmpty ? "\"\"" : pattern, limit])
+            return try rows.map { row in
+                VoiceNote(record: try MemoryRecord(row: row), text: row["noteText"], isDone: row["isDone"],
+                    reminderDate: (row["reminderDate"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                    reminderNotifiedAt: (row["reminderNotifiedAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                    reminderScheduledFor: (row["reminderScheduledFor"] as Double?).map(Date.init(timeIntervalSince1970:)))
+            }
+        }
+    }
+
+    public func editNote(id: UUID, text: String) throws {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NoteError.emptyText }
+        try updateNote(id: id, sql: "UPDATE noteState SET text = ? WHERE recordID = ?", values: [text])
+    }
+
+    public func setNoteDone(id: UUID, isDone: Bool) throws {
+        try updateNote(id: id, sql: """
+            UPDATE noteState SET isDone = ?,
+                reminderDate = CASE WHEN ? THEN NULL ELSE reminderDate END,
+                reminderNotifiedAt = CASE WHEN ? THEN NULL ELSE reminderNotifiedAt END,
+                reminderScheduledFor = CASE WHEN ? THEN NULL ELSE reminderScheduledFor END WHERE recordID = ?
+            """, values: [isDone, isDone, isDone, isDone])
+    }
+
+    public func setNoteReminder(id: UUID, date: Date?) throws {
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderDate = ?, reminderNotifiedAt = NULL, reminderScheduledFor = NULL WHERE recordID = ?",
+                       values: [date?.timeIntervalSince1970])
+    }
+
+    public func markNoteReminderScheduled(id: UUID, for date: Date?) throws {
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderScheduledFor = ? WHERE recordID = ?",
+                       values: [date?.timeIntervalSince1970])
+    }
+
+    public func markNoteReminderNotified(id: UUID, at date: Date) throws {
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderNotifiedAt = ? WHERE recordID = ?",
+                       values: [date.timeIntervalSince1970])
+    }
+
+    private func updateNote(id: UUID, sql: String, values: [(any DatabaseValueConvertible)?]) throws {
+        try database.write { db in
+            try db.execute(sql: sql, arguments: StatementArguments(values + [id.uuidString]))
+            guard db.changesCount == 1 else { throw NoteError.notFound }
+        }
+    }
+
     public func tombstone(id: UUID) throws -> RecordTombstone? {
         try database.read { db in
             guard let row = try Row.fetchOne(db,
@@ -179,6 +251,7 @@ public final class MemoryStore: Sendable {
             if deleted {
                 // An FTS5 delete leaves the deleted words in the index until a rebuild.
                 try db.execute(sql: "INSERT INTO recordsFTS(recordsFTS) VALUES('rebuild')")
+                try db.execute(sql: "INSERT INTO notesFTS(notesFTS) VALUES('rebuild')")
             }
         }
     }
@@ -395,6 +468,63 @@ public final class MemoryStore: Sendable {
                     CHECK (deletedAt IS NULL OR (text = '' AND aliases = '[]'))
                 );
                 """)
+        }
+        migrator.registerMigration("notes.createState") { db in
+            try db.execute(sql: """
+                CREATE TABLE noteState (
+                    recordID TEXT PRIMARY KEY NOT NULL REFERENCES records(id),
+                    text TEXT NOT NULL,
+                    isDone INTEGER NOT NULL DEFAULT 0 CHECK (isDone IN (0, 1)),
+                    reminderID TEXT,
+                    reminderDate REAL,
+                    CHECK ((reminderID IS NULL) = (reminderDate IS NULL))
+                );
+                INSERT INTO noteState (recordID, text)
+                    SELECT id, finalText FROM records WHERE kind = 'note' AND deletedAt IS NULL;
+                CREATE TRIGGER notes_insert AFTER INSERT ON records WHEN NEW.kind = 'note'
+                BEGIN INSERT INTO noteState (recordID, text) VALUES (NEW.id, NEW.finalText); END;
+                CREATE TRIGGER notes_delete AFTER UPDATE ON records WHEN NEW.deletedAt IS NOT NULL
+                BEGIN DELETE FROM noteState WHERE recordID = NEW.id; END;
+                """)
+            try db.create(virtualTable: "notesFTS", using: FTS5()) { table in
+                table.synchronize(withTable: "noteState")
+                table.tokenizer = .unicode61()
+                table.column("text")
+            }
+        }
+        migrator.registerMigration("notes.localReminders") { db in
+            let triggers = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'noteState'")
+            for trigger in triggers {
+                try db.execute(sql: "DROP TRIGGER \(trigger.quotedDatabaseIdentifier)")
+            }
+            try db.execute(sql: """
+                DROP TABLE notesFTS;
+                DROP TRIGGER notes_insert;
+                DROP TRIGGER notes_delete;
+                ALTER TABLE noteState RENAME TO previousNoteState;
+                CREATE TABLE noteState (
+                    recordID TEXT PRIMARY KEY NOT NULL REFERENCES records(id),
+                    text TEXT NOT NULL,
+                    isDone INTEGER NOT NULL DEFAULT 0 CHECK (isDone IN (0, 1)),
+                    reminderDate REAL,
+                    reminderNotifiedAt REAL
+                );
+                INSERT INTO noteState (recordID, text, isDone, reminderDate)
+                    SELECT recordID, text, isDone, CASE WHEN isDone THEN NULL ELSE reminderDate END FROM previousNoteState;
+                DROP TABLE previousNoteState;
+                CREATE TRIGGER notes_insert AFTER INSERT ON records WHEN NEW.kind = 'note'
+                BEGIN INSERT INTO noteState (recordID, text) VALUES (NEW.id, NEW.finalText); END;
+                CREATE TRIGGER notes_delete AFTER UPDATE ON records WHEN NEW.deletedAt IS NOT NULL
+                BEGIN DELETE FROM noteState WHERE recordID = NEW.id; END;
+                """)
+            try db.create(virtualTable: "notesFTS", using: FTS5()) { table in
+                table.synchronize(withTable: "noteState")
+                table.tokenizer = .unicode61()
+                table.column("text")
+            }
+        }
+        migrator.registerMigration("notes.reminderHandoff") { db in
+            try db.execute(sql: "ALTER TABLE noteState ADD COLUMN reminderScheduledFor REAL")
         }
         return migrator
     }

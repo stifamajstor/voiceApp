@@ -23,7 +23,7 @@ final class UserDictionaryTests: XCTestCase {
 
     func testDictationPastedTextUsesDictionaryAndHistoryKeepsRawAndFinalText() async throws {
         let repository = SQLiteHistoryRepository(directory: directory)
-        let history = DictationHistory(repository: repository, defaults: defaults)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary)
         await history.start().value
@@ -62,13 +62,53 @@ final class UserDictionaryTests: XCTestCase {
         XCTAssertEqual(try store.search("Mac").map(\.id), [saved.id])
     }
 
+    func testBothNoteShortcutsUseDictionaryWithoutPastingAndKeepRawTextAfterReopen() async throws {
+        let repository = SQLiteHistoryRepository(directory: directory)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
+        let dictionary = UserDictionary(repository: repository)
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
+        history.saveEnabled = false
+        await dictionary.start().value
+        try await dictionary.addTerm(text: "Mac", aliases: ["MEC"])
+
+        for trigger in [CaptureTrigger.notePushToTalk, .noteToggle] {
+            let empty = try await delivery.deliver(
+                rawText: " [BLANK_AUDIO] ", appBundleID: nil, appName: nil,
+                modelID: "test-model", durationSeconds: 1, destination: trigger.destination
+            ) { _ in XCTFail("A note must never paste") }
+            XCTAssertFalse(empty)
+            let saved = try await delivery.deliver(
+                rawText: "  this MEC is fast  ", appBundleID: "com.apple.TextEdit", appName: "TextEdit",
+                modelID: "test-model", durationSeconds: 2, destination: trigger.destination
+            ) { _ in XCTFail("A note must never paste") }
+            XCTAssertTrue(saved)
+        }
+        await history.pendingSave?.value
+        XCTAssertNil(history.noteError)
+        XCTAssertTrue(history.recent.isEmpty)
+
+        let reopened = try MemoryStore(directory: directory)
+        defer { try? reopened.close() }
+        let notes = try reopened.notes()
+        XCTAssertEqual(notes.count, 2)
+        for note in notes {
+            XCTAssertEqual(note.record.rawText, "  this MEC is fast  ")
+            XCTAssertEqual(note.record.finalText, "this Mac is fast")
+            XCTAssertEqual(note.text, "this Mac is fast")
+            XCTAssertEqual(note.record.appBundleID, "com.apple.TextEdit")
+            XCTAssertEqual(note.record.appName, "TextEdit")
+        }
+        XCTAssertEqual(try reopened.notes(query: "Mac").count, 2)
+        XCTAssertEqual(try reopened.count(kind: .dictation), 0)
+    }
+
     func testEditsAndDeletesTakeEffectOnNextDictationWithoutReadingStore() async throws {
         let seedStore = try MemoryStore(directory: directory)
         let initial = try seedStore.addTerm(text: "Mac", aliases: ["MEC", "Meg"])
         try seedStore.close()
 
         let repository = SpyDictionaryRepository(backing: SQLiteHistoryRepository(directory: directory))
-        let history = DictationHistory(repository: FailingHistoryRepository(), defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: FailingHistoryRepository(), notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         let dictionary = UserDictionary(repository: repository)
         let delivery = DictationDelivery(history: history, dictionary: dictionary)
         await dictionary.start().value
@@ -136,7 +176,7 @@ final class UserDictionaryTests: XCTestCase {
         await repository.failOpen(DictionaryLoadFailure())
         var logs: [String] = []
         let dictionary = UserDictionary(repository: repository, log: { logs.append($0) })
-        let history = DictationHistory(repository: FailingHistoryRepository(), defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: FailingHistoryRepository(), notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         let delivery = DictationDelivery(history: history, dictionary: dictionary)
 
         await dictionary.start().value
@@ -173,7 +213,7 @@ final class UserDictionaryTests: XCTestCase {
         }
 
         let dictionary = UserDictionary(repository: dictionaryRepo)
-        let history = DictationHistory(repository: historyRepo, defaults: defaults)
+        let history = DictationHistory(repository: historyRepo, notifications: FakeNotifications(), defaults: defaults)
         let delivery = DictationDelivery(history: history, dictionary: dictionary)
 
         let historyLoading = history.start()
@@ -328,6 +368,13 @@ private actor SpyDictionaryRepository: DictionaryRepository {
 }
 
 private actor GatedHistoryRepository: HistoryRepository {
+    func appendNote(_ note: CompletedDictation) async throws { throw CocoaError(.featureUnsupported) }
+    func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote] { [] }
+    func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
+    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
+
     private var openGate: DictionaryGate?
     var saved: [CompletedDictation] = []
 
@@ -362,6 +409,13 @@ private actor GatedHistoryRepository: HistoryRepository {
 }
 
 private struct FailingHistoryRepository: HistoryRepository {
+    func appendNote(_ note: CompletedDictation) async throws { throw CocoaError(.featureUnsupported) }
+    func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote] { [] }
+    func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
+    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
+
     func open() async throws { throw DictionaryLoadFailure() }
     func append(_ dictation: CompletedDictation) async throws -> MemoryRecord { throw DictionaryLoadFailure() }
     func records(query: String, limit: Int) async throws -> [MemoryRecord] { [] }

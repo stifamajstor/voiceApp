@@ -8,7 +8,7 @@ final class HistoryInterfaceTests: XCTestCase {
         let name = "HistoryInterfaceTests.\(UUID())"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
-        let history = DictationHistory(repository: UnavailableRepository(), defaults: defaults, log: { _ in })
+        let history = DictationHistory(repository: UnavailableRepository(), notifications: FakeNotifications(), defaults: defaults, log: { _ in })
         XCTAssertEqual(history.savingDisclosure,
                        "Dictations are saved on this Mac. Turn off in Settings → Behavior.")
         history.saveEnabled = false
@@ -25,6 +25,13 @@ final class HistoryInterfaceTests: XCTestCase {
 }
 
 private struct UnavailableRepository: HistoryRepository {
+    func appendNote(_ note: CompletedDictation) async throws { throw CocoaError(.featureUnsupported) }
+    func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote] { [] }
+    func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
+    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
+    func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
+
     func open() async throws { throw CocoaError(.fileReadNoPermission) }
     func append(_ dictation: CompletedDictation) async throws -> MemoryRecord { throw CocoaError(.fileWriteNoPermission) }
     func records(query: String, limit: Int) async throws -> [MemoryRecord] { [] }

@@ -141,7 +141,7 @@ final class DictionaryStoreTests: XCTestCase {
             return try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations ORDER BY rowid")
         }
         try database.close()
-        XCTAssertEqual(migrations, ["memoryStore.createRecords", "memoryStore.indexRecordText", "dictionary.createTerms"])
+        XCTAssertEqual(migrations, ["memoryStore.createRecords", "memoryStore.indexRecordText", "dictionary.createTerms", "notes.createState", "notes.localReminders", "notes.reminderHandoff"])
         store = try MemoryStore(directory: directory)
         try store.delete(id: record.id)
         XCTAssertNotNil(try store.tombstone(id: record.id))

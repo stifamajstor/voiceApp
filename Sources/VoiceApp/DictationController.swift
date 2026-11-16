@@ -23,8 +23,8 @@ final class DictationController: ObservableObject {
     static let maximumDuration: TimeInterval = 300
     private static let errorDisplayDuration: Duration = .seconds(3)
 
-    /// Which shortcut owns the running recording. A key-up of the *other* shortcut must not end it.
-    private enum Trigger { case pushToTalk, toggle }
+    private var recordingAppBundleID: String?
+    private var recordingAppName: String?
 
     private let modelManager: ModelManager
     private let delivery: DictationDelivery
@@ -33,11 +33,12 @@ final class DictationController: ObservableObject {
     private let modifierHotkeys = ModifierHotkeyMonitor()
 
     private var started = false
-    private var activeTrigger: Trigger?
+    private var activeTrigger: CaptureTrigger?
     private var isRequestingMicrophone = false
     private var errorClearTask: Task<Void, Never>?
     private var maxDurationTask: Task<Void, Never>?
-    private var transcriptionTask: Task<Void, Never>?
+    private(set) var transcriptionTask: Task<Void, Never>?
+    var isQuitting = false
     private var promptedAccessibilityThisLaunch = false
 
     init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary) {
@@ -56,7 +57,13 @@ final class DictationController: ObservableObject {
         hotkeys.register(
             onPushToTalkDown: { [weak self] in self?.pushToTalkDown() },
             onPushToTalkUp: { [weak self] in self?.pushToTalkUp() },
-            onToggle: { [weak self] in self?.toggle() }
+            onToggle: { [weak self] in self?.toggle() },
+            onNoteDown: { [weak self] in self?.beginRecording(trigger: .notePushToTalk) },
+            onNoteUp: { [weak self] in
+                guard let self, self.activeTrigger == .notePushToTalk else { return }
+                self.finishRecording()
+            },
+            onNoteToggle: { [weak self] in self?.toggle(trigger: .noteToggle) }
         )
         modifierHotkeys.onPushToTalkDown = { [weak self] in self?.pushToTalkDown() }
         modifierHotkeys.onPushToTalkUp = { [weak self] in self?.pushToTalkUp() }
@@ -88,25 +95,25 @@ final class DictationController: ObservableObject {
         state = .idle
     }
 
-    private func toggle() {
+    private func toggle(trigger: CaptureTrigger = .toggle) {
         switch state {
         case .recording:
             // Only the toggle shortcut may end a toggle session; while push-to-talk is held the
             // press is ignored (the user is already in a hold-to-talk gesture).
-            if activeTrigger == .toggle { finishRecording() }
+            if activeTrigger == trigger { finishRecording() }
         default:
-            beginRecording(trigger: .toggle)
+            beginRecording(trigger: trigger)
         }
     }
 
     // MARK: Recording
 
-    private func beginRecording(trigger: Trigger) {
+    private func beginRecording(trigger: CaptureTrigger) {
         switch state {
         case .idle, .error: break
         case .recording, .transcribing: return
         }
-        guard !isRequestingMicrophone else { return }
+        guard !isQuitting, !isRequestingMicrophone else { return }
 
         guard modelManager.isReady else {
             showError("No model ready — pick and download one in Settings")
@@ -131,6 +138,9 @@ final class DictationController: ObservableObject {
 
         errorClearTask?.cancel()
         activeTrigger = trigger
+        let app = NSWorkspace.shared.frontmostApplication
+        recordingAppBundleID = app?.bundleIdentifier
+        recordingAppName = app?.localizedName
         state = .recording
         playSound("Tink")
 
@@ -162,6 +172,7 @@ final class DictationController: ObservableObject {
         guard state == .recording else { return }
         maxDurationTask?.cancel()
         maxDurationTask = nil
+        let destination = activeTrigger?.destination ?? .dictation
         activeTrigger = nil
 
         let samples = recorder.stop()
@@ -175,13 +186,14 @@ final class DictationController: ObservableObject {
 
         state = .transcribing
         transcriptionTask = Task { [weak self] in
-            await self?.transcribeAndInsert(samples)
+            defer { self?.transcriptionTask = nil }
+            await self?.transcribeAndInsert(samples, destination: destination)
         }
     }
 
     // MARK: Transcription
 
-    private func transcribeAndInsert(_ samples: [Float]) async {
+    private func transcribeAndInsert(_ samples: [Float], destination: CaptureDestination) async {
         let modelID = modelManager.selectedModelID
         let rawText: String
         do {
@@ -196,11 +208,13 @@ final class DictationController: ObservableObject {
         do {
             let delivered = try await delivery.deliver(
                 rawText: rawText,
-                appBundleID: target?.bundleIdentifier,
-                appName: target?.localizedName,
+                appBundleID: destination == .note ? recordingAppBundleID : target?.bundleIdentifier,
+                appName: destination == .note ? recordingAppName : target?.localizedName,
                 modelID: modelID,
-                durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate
+                durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate,
+                destination: destination
             ) { text in
+                guard !self.isQuitting else { return }
                 try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
             }
             if delivered {

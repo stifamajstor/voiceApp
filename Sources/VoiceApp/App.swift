@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import VoiceAppCore
+import UserNotifications
 
 @main
 struct VoiceApp: App {
@@ -9,6 +10,7 @@ struct VoiceApp: App {
     @StateObject private var dictation: DictationController
     @StateObject private var history: DictationHistory
     @StateObject private var dictionary: UserDictionary
+    @StateObject private var notesWindow: NotesWindowController
     @StateObject private var historyWindow: HistoryWindowController
     @StateObject private var termination: HistoryTermination
     @StateObject private var updater = Updater()
@@ -24,27 +26,37 @@ struct VoiceApp: App {
         _dictionary = StateObject(wrappedValue: dictionary)
         let historyWindow = HistoryWindowController(history: history)
         _historyWindow = StateObject(wrappedValue: historyWindow)
-        history.start()
-        dictionary.start()
+        let notesWindow = NotesWindowController(history: history)
+        _notesWindow = StateObject(wrappedValue: notesWindow)
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
-        let termination = HistoryTermination(history: history, showHistory: historyWindow.show)
+        let termination = HistoryTermination(history: history,
+            pendingTranscription: { dictation.transcriptionTask },
+            prepareToQuit: { dictation.isQuitting = true },
+            quitCancelled: { dictation.isQuitting = false }, showHistory: {
+            if history.noteDeleteError != nil { notesWindow.show() } else { historyWindow.show() }
+        })
         _termination = StateObject(wrappedValue: termination)
         appDelegate.termination = termination
+        appDelegate.notesWindow = notesWindow
+        appDelegate.history = history
+        UNUserNotificationCenter.current().delegate = appDelegate
+        history.start()
+        dictionary.start()
         // Register hotkeys once the app has finished launching and the run loop is up.
         Task { @MainActor in dictation.start() }
     }
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(openHistory: historyWindow.show, quit: appDelegate.requestMenuQuit)
+            MenuBarView(openHistory: historyWindow.show, openNotes: notesWindow.show, quit: appDelegate.requestMenuQuit)
                 .environmentObject(modelManager)
                 .environmentObject(dictation)
                 .environmentObject(history)
                 .environmentObject(updater)
                 .environmentObject(termination)
         } label: {
-            MenuBarIcon(dictation: dictation, modelManager: modelManager)
+            MenuBarIcon(dictation: dictation, modelManager: modelManager, history: history)
         }
         .menuBarExtraStyle(.window)
 
@@ -63,6 +75,7 @@ struct VoiceApp: App {
 struct MenuBarIcon: View {
     @ObservedObject var dictation: DictationController
     @ObservedObject var modelManager: ModelManager
+    @ObservedObject var history: DictationHistory
 
     var body: some View {
         switch dictation.state {
@@ -73,7 +86,9 @@ struct MenuBarIcon: View {
         case .error:
             Image(systemName: "exclamationmark.triangle")
         case .idle:
-            if modelManager.loadState == .loading {
+            if history.noteFeedback != nil {
+                Image(systemName: "checkmark.circle").help("Note saved")
+            } else if modelManager.loadState == .loading {
                 Image(systemName: "ellipsis.circle")
             } else {
                 Image(systemName: modelManager.isReady ? "mic" : "mic.slash")
@@ -107,7 +122,26 @@ struct MenuBarIcon: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    var notesWindow: NotesWindowController?
+    var history: DictationHistory?
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        if let id = NoteNotification.noteID(for: response.notification.request.identifier) {
+            await history?.reminderDidAlert(id: id).value
+            await MainActor.run { self.notesWindow?.reveal(noteID: id) }
+        } else if response.notification.request.identifier == NoteNotification.summaryIdentifier {
+            await MainActor.run { self.notesWindow?.show() }
+        }
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        if let id = NoteNotification.noteID(for: notification.request.identifier) {
+            await history?.reminderDidAlert(id: id).value
+        }
+        return [.banner, .list, .sound]
+    }
     var termination: HistoryTermination?
 
     func requestMenuQuit() {
