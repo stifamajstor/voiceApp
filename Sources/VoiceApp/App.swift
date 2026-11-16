@@ -140,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
         if let id = NoteNotification.noteID(for: response.notification.request.identifier) {
-            await history?.reminderDidAlert(id: id).value
+            await history?.reminderDidAlert(requestID: response.notification.request.identifier).value
             await MainActor.run { self.notesWindow?.reveal(noteID: id) }
         } else if response.notification.request.identifier == NoteNotification.summaryIdentifier {
             await MainActor.run { self.notesWindow?.show() }
@@ -148,8 +148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        if let id = NoteNotification.noteID(for: notification.request.identifier) {
-            await history?.reminderDidAlert(id: id).value
+        if NoteNotification.noteID(for: notification.request.identifier) != nil {
+            await history?.reminderDidAlert(requestID: notification.request.identifier).value
         }
         return [.banner, .list, .sound]
     }

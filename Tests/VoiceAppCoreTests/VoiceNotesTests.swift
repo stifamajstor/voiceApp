@@ -167,7 +167,7 @@ final class VoiceNotesTests: XCTestCase {
                 BEGIN INSERT INTO noteState (recordID, text) VALUES (NEW.id, NEW.finalText); END;
                 CREATE TRIGGER notes_delete AFTER UPDATE ON records WHEN NEW.deletedAt IS NOT NULL
                 BEGIN DELETE FROM noteState WHERE recordID = NEW.id; END;
-                DELETE FROM grdb_migrations WHERE identifier IN ('notes.localReminders', 'notes.reminderHandoff');
+                DELETE FROM grdb_migrations WHERE identifier IN ('notes.localReminders', 'notes.reminderHandoff', 'notes.reminderState');
                 """)
             try db.create(virtualTable: "notesFTS", using: FTS5()) { table in
                 table.synchronize(withTable: "noteState")
@@ -179,7 +179,7 @@ final class VoiceNotesTests: XCTestCase {
         let migrated = try MemoryStore(directory: directory)
         XCTAssertEqual(try migrated.note(id: active.id)?.text, "edited original active")
         XCTAssertEqual(try migrated.note(id: active.id)?.reminderDate, Date(timeIntervalSince1970: 1_900_000_000))
-        XCTAssertNil(try migrated.note(id: active.id)?.reminderNotifiedAt)
+        XCTAssertEqual(try migrated.note(id: active.id)?.reminder, .scheduled(dueAt: Date(timeIntervalSince1970: 1_900_000_000)))
         XCTAssertEqual(try migrated.note(id: done.id)?.isDone, true)
         XCTAssertNil(try migrated.note(id: done.id)?.reminderDate)
         XCTAssertEqual(try migrated.notes(query: "edited original act").map(\.id), [active.id])
@@ -341,12 +341,12 @@ final class VoiceNotesTests: XCTestCase {
             Set(range.map { NoteNotification.identifier(for: ids[$0], due: initial.addingTimeInterval(Double($0 + 1) * 60)) })
         }
         XCTAssertEqual(Set(fake.pending.keys), pendingIDs(0..<60))
-        XCTAssertEqual(history.notes.filter { $0.reminderScheduledFor != nil }.count, 60)
+        XCTAssertEqual(history.notes.filter { $0.reminder.isHandedToMacOS }.count, 60)
         let fired = NoteNotification.identifier(for: ids[0], due: initial.addingTimeInterval(60))
         clock = initial.addingTimeInterval(60)
         fake.pending[fired] = nil
         fake.delivered.insert(fired)
-        await history.reminderDidAlert(id: ids[0]).value
+        await history.reminderDidAlert(requestID: fired).value
         XCTAssertEqual(Set(fake.pending.keys), pendingIDs(1..<61))
         await history.removeNoteReminder(id: ids[1]).value
         XCTAssertEqual(Set(fake.pending.keys), pendingIDs(2..<62))
@@ -358,8 +358,8 @@ final class VoiceNotesTests: XCTestCase {
         // Move a previously scheduled reminder outside the cap: cancel its handoff too.
         await history.remindNote(id: ids[4], date: initial.addingTimeInterval(100_000)).value
         XCTAssertEqual(Set(fake.pending.keys), pendingIDs(5..<65))
-        XCTAssertNil(history.notes.first { $0.id == ids[4] }?.reminderScheduledFor)
-        XCTAssertNotNil(history.notes.first { $0.id == ids[0] }?.reminderNotifiedAt)
+        XCTAssertEqual(history.notes.first { $0.id == ids[4] }?.reminder, .scheduled(dueAt: initial.addingTimeInterval(100_000)))
+        XCTAssertEqual(history.notes.first { $0.id == ids[0] }?.reminder, .alerted(dueAt: initial.addingTimeInterval(60)))
     }
 
     func testOnlyNeverHandedOffRemindersBeyondCapCatchUpAfterClosedDelivery() async throws {
@@ -381,7 +381,7 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertEqual(fake.added.count, 1)
         XCTAssertEqual(fake.added.first?.text, "40 reminders were due while VoiceApp was closed")
         await relaunched.refreshNotes()
-        XCTAssertTrue(relaunched.notes.allSatisfy { $0.reminderNotifiedAt != nil })
+        XCTAssertTrue(relaunched.notes.allSatisfy { $0.reminder.isAlerted })
     }
 
     func testThreeNeverScheduledOverdueRemindersProduceOneSummaryOnlyOnce() async throws {
@@ -398,7 +398,7 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertEqual(fake.added.count, 1)
         XCTAssertEqual(fake.added.first?.text, "3 reminders were due while VoiceApp was closed")
         let reopened = try MemoryStore(directory: directory)
-        XCTAssertTrue(try reopened.notes().allSatisfy { $0.reminderNotifiedAt != nil })
+        XCTAssertTrue(try reopened.notes().allSatisfy { $0.reminder.isAlerted })
         try reopened.close()
         fake.added = []
         fake.delivered = []
@@ -435,7 +435,7 @@ final class VoiceNotesTests: XCTestCase {
         XCTAssertEqual(fake.added.filter { $0.identifier == overdueID }.count, 1)
         XCTAssertNil(fake.added.first { $0.identifier == overdueID }?.date)
         XCTAssertTrue(try XCTUnwrap(relaunched.notes.first { $0.id == overdue.id }).isOverdue(at: afterDue))
-        XCTAssertNotNil(relaunched.notes.first { $0.id == overdue.id }?.reminderNotifiedAt)
+        XCTAssertEqual(relaunched.notes.first { $0.id == overdue.id }?.reminder, .alerted(dueAt: clock.addingTimeInterval(60)))
         XCTAssertNil(fake.pending[orphanRequest.identifier])
         fake.delivered.remove(overdueID)
         let twice = makeHistory(notifications: fake, now: { afterDue })
@@ -658,6 +658,11 @@ final class VoiceNotesTests: XCTestCase {
     }
 }
 
+extension ReminderState {
+    var isHandedToMacOS: Bool { if case .handedToMacOS = self { return true } else { return false } }
+    var isAlerted: Bool { if case .alerted = self { return true } else { return false } }
+}
+
 @MainActor
 final class FakeReminderTimer: ReminderTimer {
     private(set) var armedAt: Date?
@@ -732,11 +737,8 @@ private actor GatedNotesRepository: HistoryRepository {
     }
     func editNote(id: UUID, text: String) async throws { try await repository.editNote(id: id, text: text) }
     func setNoteDone(id: UUID, isDone: Bool) async throws { try await repository.setNoteDone(id: id, isDone: isDone) }
-    func markNoteReminderScheduled(id: UUID, for date: Date?) async throws {
-        try await repository.markNoteReminderScheduled(id: id, for: date)
-    }
-    func markNoteReminderNotified(id: UUID, at date: Date) async throws {
-        try await repository.markNoteReminderNotified(id: id, at: date)
+    func transitionNoteReminder(id: UUID, from: ReminderState, to: ReminderState) async throws -> Bool {
+        try await repository.transitionNoteReminder(id: id, from: from, to: to)
     }
     func setNoteReminder(id: UUID, date: Date?) async throws {
         if failReminderLink { throw CocoaError(.fileWriteNoPermission) }
@@ -746,7 +748,7 @@ private actor GatedNotesRepository: HistoryRepository {
 
 // History-only doubles must fail if a test accidentally attempts notification persistence.
 extension HistoryRepository {
-    func markNoteReminderScheduled(id: UUID, for date: Date?) async throws {
+    func transitionNoteReminder(id: UUID, from: ReminderState, to: ReminderState) async throws -> Bool {
         throw CocoaError(.featureUnsupported)
     }
 }

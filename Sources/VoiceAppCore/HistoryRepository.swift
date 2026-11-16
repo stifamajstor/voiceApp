@@ -59,8 +59,8 @@ public protocol HistoryRepository: Sendable {
     func editNote(id: UUID, text: String) async throws
     func setNoteDone(id: UUID, isDone: Bool) async throws
     func setNoteReminder(id: UUID, date: Date?) async throws
-    func markNoteReminderScheduled(id: UUID, for date: Date?) async throws
-    func markNoteReminderNotified(id: UUID, at date: Date) async throws
+    /// Saves `to` only if the note's reminder is still in state `from`. Returns whether it was saved.
+    func transitionNoteReminder(id: UUID, from: ReminderState, to: ReminderState) async throws -> Bool
 }
 
 extension HistoryRepository {
@@ -176,12 +176,8 @@ public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
         try availableStore().setNoteReminder(id: id, date: date)
     }
 
-    public func markNoteReminderScheduled(id: UUID, for date: Date?) async throws {
-        try availableStore().markNoteReminderScheduled(id: id, for: date)
-    }
-
-    public func markNoteReminderNotified(id: UUID, at date: Date) async throws {
-        try availableStore().markNoteReminderNotified(id: id, at: date)
+    public func transitionNoteReminder(id: UUID, from: ReminderState, to: ReminderState) async throws -> Bool {
+        try availableStore().transitionNoteReminder(id: id, from: from, to: to)
     }
 
     private func availableStore() throws -> MemoryStore {

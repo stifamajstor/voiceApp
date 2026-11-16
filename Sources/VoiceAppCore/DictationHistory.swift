@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import OSLog
@@ -35,10 +36,15 @@ public final class DictationHistory: ObservableObject {
     private var noteFeedbackTask: Task<Void, Never>?
     private let reminders: NoteReminderScheduler
     private let notificationEvents: NotificationCenter
+    private let wakeEvents: NotificationCenter
     private let reminderTimer: any ReminderTimer
     private var clockObservers: [NSObjectProtocol] = []
-    /// Wake a moment after the due time so macOS has delivered its own request first.
+    private var wakeObservers: [NSObjectProtocol] = []
+    /// Wake a moment after the due time. A timer that fires a hair early finds the due time not reached
+    /// yet and is armed again, so no reminder waits for an outside event.
     static let reminderWakeDelay: TimeInterval = 1
+    /// How many times reminders were reconciled. Tests wait on it for events that arrive asynchronously.
+    private(set) var reminderPasses = 0
     private let now: () -> Date
     @Published public private(set) var notificationError: String?
     @Published public var focusedNoteID: UUID?
@@ -120,14 +126,18 @@ public final class DictationHistory: ObservableObject {
     }
 
     public init(repository: any HistoryRepository = SQLiteHistoryRepository(),
-                notifications: (any NoteNotificationCenter)? = nil, notificationEvents: NotificationCenter = .default, reminderTimer: (any ReminderTimer)? = nil, now: @escaping () -> Date = { .now }, defaults: UserDefaults = .standard,
+                notifications: (any NoteNotificationCenter)? = nil, notificationEvents: NotificationCenter = .default,
+                wakeEvents: NotificationCenter = NSWorkspace.shared.notificationCenter,
+                reminderTimer: (any ReminderTimer)? = nil, reminderLimit: Int = NoteReminderScheduler.pendingLimit,
+                now: @escaping () -> Date = { .now }, defaults: UserDefaults = .standard,
                 debounce: (@Sendable (Duration) async throws -> Void)? = nil,
                 log: @escaping (String) -> Void = {
                     Logger(subsystem: "com.local.voiceapp", category: "History").error("\($0, privacy: .private)")
                 }) {
         self.repository = repository
-        self.reminders = NoteReminderScheduler(center: notifications ?? SystemNoteNotificationCenter())
+        self.reminders = NoteReminderScheduler(center: notifications ?? SystemNoteNotificationCenter(), limit: reminderLimit)
         self.notificationEvents = notificationEvents
+        self.wakeEvents = wakeEvents
         self.reminderTimer = reminderTimer ?? SystemReminderTimer()
         self.now = now
         self.defaults = defaults
@@ -140,10 +150,15 @@ public final class DictationHistory: ObservableObject {
                 Task { @MainActor [weak self] in self?.reconcileReminders(resubmit: .all) }
             }
         }
+        // A Mac that slept through a due time looks at its reminders as soon as it wakes.
+        wakeObservers = [wakeEvents.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.reconcileReminders() }
+        }]
     }
 
     deinit {
         for observer in clockObservers { notificationEvents.removeObserver(observer) }
+        for observer in wakeObservers { wakeEvents.removeObserver(observer) }
     }
 
     @discardableResult
@@ -153,7 +168,7 @@ public final class DictationHistory: ObservableObject {
             do {
                 try await repository.open()
                 storedCount = try await repository.count()
-                await restoreReminderNotifications(catchUp: .afterLaunch)
+                await restoreReminderNotifications(afterLaunch: true)
                 isOpening = false
                 await refreshRecent()
             } catch {
@@ -436,7 +451,7 @@ public final class DictationHistory: ObservableObject {
         enqueueNoteOperation(completion: completion) {
             try await self.repository.editNote(id: id, text: text)
             guard try await self.repository.note(id: id)?.hasActiveReminder == true else { return }
-            await self.restoreReminderNotifications(catchUp: .off, resubmit: .notes([id]))
+            await self.restoreReminderNotifications(resubmit: .notes([id]))
         }
     }
 
@@ -445,7 +460,7 @@ public final class DictationHistory: ObservableObject {
         enqueueNoteOperation {
             let hadReminder = try await self.repository.note(id: id)?.hasActiveReminder == true
             try await self.repository.setNoteDone(id: id, isDone: isDone)
-            if hadReminder { await self.restoreReminderNotifications(catchUp: .off) }
+            if hadReminder { await self.restoreReminderNotifications() }
         }
     }
 
@@ -466,7 +481,7 @@ public final class DictationHistory: ObservableObject {
             let hadReminder = try await self.repository.note(id: note.id)?.hasActiveReminder == true
             try await self.repository.delete(ids: [note.id])
             await self.reminders.remove(id: note.id)
-            if hadReminder { await self.restoreReminderNotifications(catchUp: .off) }
+            if hadReminder { await self.restoreReminderNotifications() }
         }
     }
 
@@ -476,6 +491,8 @@ public final class DictationHistory: ObservableObject {
             let note = try await self.currentNote(id: id)
             guard !note.isDone else { return }
             try await self.repository.setNoteReminder(id: id, date: date)
+            // A new set starts the reminder over, so nothing of an earlier alert stays behind to be mistaken for it.
+            await self.reminders.remove(id: id)
             await self.restoreReminderNotifications(requestAuthorization: true)
         }
     }
@@ -486,18 +503,23 @@ public final class DictationHistory: ObservableObject {
             let hadReminder = try await self.repository.note(id: id)?.hasActiveReminder == true
             try await self.repository.setNoteReminder(id: id, date: nil)
             await self.reminders.remove(id: id)
-            if hadReminder { await self.restoreReminderNotifications(catchUp: .off) }
+            if hadReminder { await self.restoreReminderNotifications() }
         }
     }
 
+    /// macOS presented the request `requestID`, or the user clicked it.
     @discardableResult
-    public func reminderDidAlert(id: UUID) -> Task<Void, Never> {
+    public func reminderDidAlert(requestID: String) -> Task<Void, Never> {
         enqueueNoteOperation {
-            guard let note = try await self.repository.note(id: id),
-                  let due = note.reminderDate, due <= self.now() else { return }
-            try await self.repository.markNoteReminderNotified(id: id, at: self.now())
-            // A delivery frees a slot under the 60-request cap and is a chance to alert for reminders beyond it.
-            await self.restoreReminderNotifications(catchUp: .running)
+            if let id = NoteNotification.noteID(for: requestID), let due = NoteNotification.dueDate(for: requestID),
+               let note = try await self.repository.note(id: id) {
+                let next = ReminderStateMachine.next(note.reminder, .delivered(due))
+                if next != note.reminder {
+                    _ = try await self.repository.transitionNoteReminder(id: id, from: note.reminder, to: next)
+                }
+            }
+            // A delivery frees a slot under the 60-request cap, so top up.
+            await self.restoreReminderNotifications()
         }
     }
 
@@ -518,40 +540,46 @@ public final class DictationHistory: ObservableObject {
         }
     }
 
-    private func restoreReminderNotifications(requestAuthorization: Bool = false, catchUp: ReminderCatchUp = .running,
+    private func restoreReminderNotifications(requestAuthorization: Bool = false, afterLaunch: Bool = false,
                                               resubmit: ReminderResubmit = .none) async {
+        defer { reminderPasses += 1 }
         do {
             // Only notes that carry a reminder matter here, however many notes exist.
             let notes = try await repository.notes(query: "", remindersOnly: true, limit: .max)
-            await reminders.removeOrphans(notes: notes)
             notificationError = nil
-            reminderAuthorization = .authorized
             let active = notes.filter(\.hasActiveReminder)
-            guard !active.isEmpty else { reminderTimer.cancel(); return }
-            reminderAuthorization = try await reminders.authorization(requestIfNeeded: requestAuthorization)
-            let current = now()
-            let didSchedule: (UUID, Date?) async throws -> Void = { id, date in
-                try await self.repository.markNoteReminderScheduled(id: id, for: date)
-            }
-            guard reminderAuthorization == .authorized else {
+            guard !active.isEmpty else {
+                reminderAuthorization = .authorized
                 reminderTimer.cancel()
-                try await reminders.forgetHandoffs(notes: active, now: current, didSchedule: didSchedule)
+                await reminders.removeOrphans(notes: active)
                 return
             }
-            armReminderTimer(for: active, now: current)
-            try await reminders.reconcile(notes: notes, now: current, catchUp: catchUp, resubmit: resubmit,
-                didSchedule: didSchedule,
-                didAlert: { id in try await self.repository.markNoteReminderNotified(id: id, at: self.now()) })
+            var failure: (any Error)?
+            let status: NoteNotificationAuthorization
+            do {
+                status = try await reminders.authorization(requestIfNeeded: requestAuthorization)
+            } catch {
+                failure = error
+                status = (try? await reminders.authorization(requestIfNeeded: false)) ?? .notDetermined
+            }
+            reminderAuthorization = status
+            let result = await reminders.reconcile(notes: active, now: now(), authorized: status == .authorized,
+                afterLaunch: afterLaunch, resubmit: resubmit) { id, from, to in
+                try await self.repository.transitionNoteReminder(id: id, from: from, to: to)
+            }
+            // The timer follows the saved states, whatever the notification settings are.
+            armReminderTimer(at: result.nextWake)
+            if let error = failure ?? result.error { throw error }
         } catch {
             notificationError = "The reminder is saved in Notes, but its notification could not be scheduled. Try refreshing notifications."
             log("Could not reconcile reminder notifications: \(error.localizedDescription)")
         }
     }
 
-    /// One timer for the next due time: it tops up the 60-request window, alerts for a reminder macOS
-    /// was never given, and notices notifications turned off.
-    private func armReminderTimer(for active: [VoiceNote], now: Date) {
-        guard let next = active.compactMap(\.reminderDate).filter({ $0 > now }).min() else {
+    /// One timer for the next due time. It tops up the 60-request window, alerts for a reminder macOS was
+    /// never given, and keeps running whether or not notifications are on.
+    private func armReminderTimer(at next: Date?) {
+        guard let next else {
             reminderTimer.cancel()
             return
         }

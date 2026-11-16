@@ -176,7 +176,7 @@ public final class MemoryStore: Sendable {
             if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && tokens.isEmpty { return [] }
             let rows = try Row.fetchAll(db, sql: """
                 SELECT records.*, noteState.text AS noteText, noteState.isDone,
-                    noteState.reminderNotifiedAt, noteState.reminderDate, noteState.reminderScheduledFor
+                    noteState.reminderDate, noteState.reminderPhase
                 FROM records JOIN noteState ON noteState.recordID = records.id
                 WHERE records.deletedAt IS NULL AND records.kind = 'note'
                     AND (? IS NULL OR records.id = ?)
@@ -187,9 +187,9 @@ public final class MemoryStore: Sendable {
                 """, arguments: [id?.uuidString, id?.uuidString, remindersOnly, pattern, pattern.isEmpty ? "\"\"" : pattern, limit])
             return try rows.map { row in
                 VoiceNote(record: try MemoryRecord(row: row), text: row["noteText"], isDone: row["isDone"],
-                    reminderDate: (row["reminderDate"] as Double?).map(Date.init(timeIntervalSince1970:)),
-                    reminderNotifiedAt: (row["reminderNotifiedAt"] as Double?).map(Date.init(timeIntervalSince1970:)),
-                    reminderScheduledFor: (row["reminderScheduledFor"] as Double?).map(Date.init(timeIntervalSince1970:)))
+                    reminder: ReminderState(
+                        dueAt: (row["reminderDate"] as Double?).map(Date.init(timeIntervalSince1970:)),
+                        phase: row["reminderPhase"]))
             }
         }
     }
@@ -199,28 +199,32 @@ public final class MemoryStore: Sendable {
         try updateNote(id: id, sql: "UPDATE noteState SET text = ? WHERE recordID = ?", values: [text])
     }
 
+    /// Marking done is the `done` event: the reminder goes back to `idle`. Marking undone does not bring it back.
     public func setNoteDone(id: UUID, isDone: Bool) throws {
         try updateNote(id: id, sql: """
             UPDATE noteState SET isDone = ?,
                 reminderDate = CASE WHEN ? THEN NULL ELSE reminderDate END,
-                reminderNotifiedAt = CASE WHEN ? THEN NULL ELSE reminderNotifiedAt END,
-                reminderScheduledFor = CASE WHEN ? THEN NULL ELSE reminderScheduledFor END WHERE recordID = ?
-            """, values: [isDone, isDone, isDone, isDone])
+                reminderPhase = CASE WHEN ? THEN NULL ELSE reminderPhase END WHERE recordID = ?
+            """, values: [isDone, isDone, isDone])
     }
 
+    /// The user sets (`date`) or removes (`nil`) the reminder. Either way the state starts over.
     public func setNoteReminder(id: UUID, date: Date?) throws {
-        try updateNote(id: id, sql: "UPDATE noteState SET reminderDate = ?, reminderNotifiedAt = NULL, reminderScheduledFor = NULL WHERE recordID = ?",
-                       values: [date?.timeIntervalSince1970])
+        let state = ReminderStateMachine.next(.idle, date.map(ReminderEvent.set) ?? .remove)
+        try updateNote(id: id, sql: "UPDATE noteState SET reminderDate = ?, reminderPhase = ? WHERE recordID = ?",
+                       values: [state.dueAt?.timeIntervalSince1970, state.phase])
     }
 
-    public func markNoteReminderScheduled(id: UUID, for date: Date?) throws {
-        try updateNote(id: id, sql: "UPDATE noteState SET reminderScheduledFor = ? WHERE recordID = ?",
-                       values: [date?.timeIntervalSince1970])
-    }
-
-    public func markNoteReminderNotified(id: UUID, at date: Date) throws {
-        try updateNote(id: id, sql: "UPDATE noteState SET reminderNotifiedAt = ? WHERE recordID = ?",
-                       values: [date.timeIntervalSince1970])
+    /// Saves `to` only if the note is still in state `from`. Returns whether it was saved.
+    public func transitionNoteReminder(id: UUID, from: ReminderState, to: ReminderState) throws -> Bool {
+        try database.write { db in
+            try db.execute(sql: """
+                UPDATE noteState SET reminderDate = ?, reminderPhase = ?
+                WHERE recordID = ? AND reminderDate IS ? AND reminderPhase IS ?
+                """, arguments: [to.dueAt?.timeIntervalSince1970, to.phase, id.uuidString,
+                                 from.dueAt?.timeIntervalSince1970, from.phase])
+            return db.changesCount == 1
+        }
     }
 
     private func updateNote(id: UUID, sql: String, values: [(any DatabaseValueConvertible)?]) throws {
@@ -567,6 +571,19 @@ public final class MemoryStore: Sendable {
                 BEGIN
                     SELECT RAISE(ABORT, 'tombstones cannot retain correction metadata');
                 END;
+                """)
+        }
+        // One explicit state per reminder replaces the two timestamps it used to be inferred from.
+        migrator.registerMigration("notes.reminderState") { db in
+            try db.execute(sql: """
+                ALTER TABLE noteState ADD COLUMN reminderPhase TEXT;
+                UPDATE noteState SET reminderPhase = CASE
+                    WHEN reminderDate IS NULL THEN NULL
+                    WHEN reminderNotifiedAt IS NOT NULL THEN 'alerted'
+                    WHEN reminderScheduledFor = reminderDate THEN 'handed'
+                    ELSE 'scheduled' END;
+                ALTER TABLE noteState DROP COLUMN reminderNotifiedAt;
+                ALTER TABLE noteState DROP COLUMN reminderScheduledFor;
                 """)
         }
         return migrator

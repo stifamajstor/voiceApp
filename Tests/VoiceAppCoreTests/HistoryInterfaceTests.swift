@@ -29,7 +29,6 @@ private struct UnavailableRepository: HistoryRepository {
     func notes(query: String, remindersOnly: Bool, limit: Int) async throws -> [VoiceNote] { [] }
     func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
-    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
 
     func open() async throws { throw CocoaError(.fileReadNoPermission) }
