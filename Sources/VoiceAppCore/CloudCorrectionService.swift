@@ -10,9 +10,38 @@ public protocol CloudCorrecting: AnyObject, Sendable {
         appBundleID: String?,
         appName: String?
     ) async -> CorrectionOutcome
+
+    @MainActor
+    func correct(
+        _ text: String,
+        dictionaryTerms: [String],
+        protectedRanges: [Range<String.Index>],
+        appBundleID: String?,
+        appName: String?,
+        willSendRequest: @escaping @MainActor () -> Void
+    ) async -> CorrectionOutcome
 }
 
 public extension CloudCorrecting {
+    @MainActor
+    func correct(
+        _ text: String,
+        dictionaryTerms: [String],
+        protectedRanges: [Range<String.Index>],
+        appBundleID: String?,
+        appName: String?,
+        willSendRequest: @escaping @MainActor () -> Void
+    ) async -> CorrectionOutcome {
+        willSendRequest()
+        return await correct(
+            text,
+            dictionaryTerms: dictionaryTerms,
+            protectedRanges: protectedRanges,
+            appBundleID: appBundleID,
+            appName: appName
+        )
+    }
+
     @MainActor
     func correct(
         _ text: String,
@@ -437,6 +466,24 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         appBundleID: String?,
         appName: String?
     ) async -> CorrectionOutcome {
+        await correct(
+            text,
+            dictionaryTerms: dictionaryTerms,
+            protectedRanges: protectedRanges,
+            appBundleID: appBundleID,
+            appName: appName,
+            willSendRequest: {}
+        )
+    }
+
+    public func correct(
+        _ text: String,
+        dictionaryTerms: [String],
+        protectedRanges: [Range<String.Index>],
+        appBundleID: String?,
+        appName: String?,
+        willSendRequest: @escaping @MainActor () -> Void
+    ) async -> CorrectionOutcome {
         guard isEnabled else {
             return CorrectionOutcome(outputText: text)
         }
@@ -489,6 +536,7 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
         )
         let store = self.secretStore
         let stage = DeadlineStageTracker()
+        let callbackBox = MainActorCallbackBox(willSendRequest)
 
         do {
             let raced = try await raceWithDeadline(deadline) {
@@ -505,6 +553,10 @@ public final class CloudCorrectionService: ObservableObject, CloudCorrecting {
                 guard let apiKey else {
                     return RacedCorrectionResult.missingKey
                 }
+                await MainActor.run {
+                    callbackBox.call()
+                }
+                try Task.checkCancellation()
                 do {
                     let edits = try await impl.correct(promptContext, modelID: modelID, apiKey: apiKey)
                     return RacedCorrectionResult.edits(edits, apiKey: apiKey)
@@ -738,6 +790,19 @@ private final class DeadlineStageTracker: @unchecked Sendable {
 
     func markKeyReadCompleted() {
         lock.withLock { keyReadCompleted = true }
+    }
+}
+
+private final class MainActorCallbackBox: @unchecked Sendable {
+    private let body: @MainActor () -> Void
+
+    init(_ body: @escaping @MainActor () -> Void) {
+        self.body = body
+    }
+
+    @MainActor
+    func call() {
+        body()
     }
 }
 

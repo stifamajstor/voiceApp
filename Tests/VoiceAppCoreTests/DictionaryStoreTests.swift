@@ -20,6 +20,7 @@ final class DictionaryStoreTests: XCTestCase {
     func testAddEditDeleteAndReopenPreserveIdentityAndClocks() throws {
         let before = Date.now
         let term = try store.addTerm(text: "ChatGPT", aliases: ["chat GPT", "chat gpt"])
+        XCTAssertEqual(term.aliases, ["chat GPT"])
         XCTAssertEqual(term.deviceID, store.deviceID)
         XCTAssertGreaterThanOrEqual(term.updatedAt, before)
         XCTAssertNil(term.deletedAt)
@@ -51,7 +52,8 @@ final class DictionaryStoreTests: XCTestCase {
                 XCTAssertEqual(error as? DictionaryError, .emptyText)
             }
         }
-        for text in ["C++", ".NET", "a|b", "(x)", #"\d"#, "!!!", " \u{301}", String(repeating: "ž", count: 50_000)] {
+        for text in ["C++", ".NET", "a|b", "(x)", #"\d"#, "!!!", " \u{301}",
+                     String(repeating: "ž", count: DictionaryTerm.maximumLength)] {
             let term = try store.addTerm(text: text, aliases: ["", " \t"])
             XCTAssertEqual(try store.dictionaryTerm(id: term.id), term)
         }
@@ -60,6 +62,52 @@ final class DictionaryStoreTests: XCTestCase {
         let term = try store.addTerm(text: "Valid")
         XCTAssertThrowsError(try store.updateTerm(id: term.id, text: " ", aliases: []))
         XCTAssertEqual(try store.dictionaryTerm(id: term.id), term)
+    }
+
+    func testLengthLimitsDuplicateCollapseSelfAliasDropAndLegacyOversizedRows() throws {
+        let maxText = "  " + String(repeating: "a", count: DictionaryTerm.maximumLength) + "  "
+        let maxAlias = String(repeating: "b", count: DictionaryTerm.maximumLength)
+        let boundary = try store.addTerm(text: maxText, aliases: [maxAlias])
+        XCTAssertEqual(boundary.text.count, DictionaryTerm.maximumLength)
+        XCTAssertEqual(boundary.aliases, [maxAlias])
+        XCTAssertFalse(boundary.exceedsLengthLimit)
+
+        let overText = String(repeating: "c", count: DictionaryTerm.maximumLength + 1)
+        XCTAssertThrowsError(try store.addTerm(text: overText, aliases: [])) { error in
+            XCTAssertEqual(error as? DictionaryError, .textTooLong(limit: DictionaryTerm.maximumLength))
+        }
+        let overAlias = String(repeating: "d", count: DictionaryTerm.maximumLength + 1)
+        XCTAssertThrowsError(try store.addTerm(text: "Allowed", aliases: [overAlias])) { error in
+            XCTAssertEqual(
+                error as? DictionaryError,
+                .aliasTooLong(value: overAlias, limit: DictionaryTerm.maximumLength)
+            )
+        }
+
+        // Duplicate aliases collapse and self-matching aliases are dropped.
+        let normalized = DictionaryTerm.normalizeAliases(["Mac", "MAC", "MEC", "mec", "Meg"], matchingText: "Mac")
+        XCTAssertEqual(normalized.aliases, ["MEC", "Meg"])
+        XCTAssertEqual(normalized.droppedSelfMatches, ["Mac"])
+        let deduped = try store.addTerm(text: "Mac", aliases: ["mac", "MEC", "mec", "Meg"])
+        XCTAssertEqual(deduped.aliases, ["MEC", "Meg"])
+
+        // Pre-existing oversized entries in SQLite stay readable and are flagged for UI/matcher skip.
+        let legacyID = UUID()
+        let hugeText = String(repeating: "lorem ", count: 200)
+        try store.close()
+        let db = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        try db.write { db in
+            try db.execute(
+                sql: "INSERT INTO dictionaryTerms (id, text, aliases, updatedAt, deviceID, deletedAt) VALUES (?, ?, ?, ?, ?, NULL)",
+                arguments: [legacyID.uuidString, hugeText, "[\"the\"]", 1.0, UUID().uuidString]
+            )
+        }
+        try db.close()
+        store = try MemoryStore(directory: directory)
+        let loaded = try store.listTerms()
+        let legacy = try XCTUnwrap(loaded.first(where: { $0.id == legacyID }))
+        XCTAssertTrue(legacy.exceedsLengthLimit)
+        XCTAssertTrue(legacy.hasOversizedText)
     }
 
     func testConflictsCoverTextAliasesUnicodeAndWhitespaceAndRollBack() throws {

@@ -189,6 +189,7 @@ private struct DictionarySection: View {
     @State private var termPendingDeletion: DictionaryTerm?
     @State private var isDeleteConfirmationPresented = false
     @State private var deleteError: String?
+    @State private var saveNotice: String?
 
     private static let searchThreshold = 8
 
@@ -204,14 +205,38 @@ private struct DictionarySection: View {
         }
     }
 
+    private var lengthWarning: String? {
+        let entries = dictionary.oversizedTerms.filter(\.hasOversizedText).count
+        let aliases = dictionary.oversizedTerms.filter { !$0.hasOversizedText }
+            .reduce(0) { $0 + $1.oversizedAliases.count }
+        var skipped: [String] = []
+        if entries > 0 { skipped.append("\(entries) whole \(entries == 1 ? "entry" : "entries")") }
+        if aliases > 0 { skipped.append("\(aliases) \(aliases == 1 ? "alias" : "aliases")") }
+        guard !skipped.isEmpty else { return nil }
+        return "Skipped during dictation: " + skipped.joined(separator: "; ")
+            + ". Limit: \(DictionaryTerm.maximumLength) characters and Unicode scalars per value."
+    }
+
     private var summaryText: String {
         if dictionary.isLoading { return "Loading dictionary…" }
+        if dictionary.storeError != nil {
+            if dictionary.isRetrying { return "Retrying dictionary load…" }
+            if dictionary.isRetryScheduled { return "Dictionary unavailable — retrying automatically" }
+            return "Dictionary unavailable"
+        }
         if dictionary.terms.isEmpty { return "No terms yet" }
         if !trimmedQuery.isEmpty {
             return "\(filteredTerms.count) of \(dictionary.terms.count) terms"
         }
         let count = dictionary.terms.count
         return "\(count) \(count == 1 ? "term" : "terms")"
+    }
+
+    private var deleteAlertTitle: String {
+        guard let term = termPendingDeletion, !term.text.isEmpty else {
+            return "Delete term?"
+        }
+        return "Delete \"\(term.text)\"?"
     }
 
     var body: some View {
@@ -223,16 +248,58 @@ private struct DictionarySection: View {
                 Spacer()
                 Button("Add Term…") {
                     deleteError = nil
+                    saveNotice = nil
                     editorMode = .add
                 }
                 .buttonStyle(NeonButtonStyle(prominent: true))
                 .disabled(dictionary.isLoading || dictionary.storeError != nil)
             }
 
-            if let error = dictionary.storeError ?? deleteError {
-                Label(error, systemImage: "exclamationmark.triangle")
+            if let storeError = dictionary.storeError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(storeError, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.warning)
+                        .font(.callout)
+                    HStack(spacing: 8) {
+                        if dictionary.isRetrying {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(Theme.neon)
+                            Text("Retrying…")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                        } else {
+                            Button("Retry") {
+                                dictionary.retryLoadIfNeeded()
+                            }
+                            .buttonStyle(NeonButtonStyle())
+                            if dictionary.isRetryScheduled {
+                                Text("Will retry automatically.")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+                    }
+                }
+            } else if let deleteError {
+                Label(deleteError, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(Theme.warning)
                     .font(.callout)
+            }
+
+            if let saveNotice {
+                Label(saveNotice, systemImage: "info.circle")
+                    .foregroundStyle(Theme.textSecondary)
+                    .font(.callout)
+            }
+
+            if let lengthWarning {
+                Label(
+                    lengthWarning,
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(Theme.warning)
+                .font(.callout)
             }
 
             if dictionary.terms.count >= Self.searchThreshold || !searchQuery.isEmpty {
@@ -266,24 +333,31 @@ private struct DictionarySection: View {
         } header: {
             SectionTitle("Dictionary")
         } footer: {
-            Text("Terms and aliases match whole words case-insensitively before pasting and are stored locally.")
+            Text("Terms and aliases (up to \(DictionaryTerm.maximumLength) characters and Unicode scalars each) match whole words case-insensitively before pasting and are stored locally.")
                 .font(.caption)
                 .foregroundStyle(Theme.textSecondary)
         }
+        .onAppear {
+            dictionary.retryLoadIfNeeded()
+        }
         .sheet(item: $editorMode) { mode in
-            TermEditorSheet(mode: mode)
-                .environmentObject(dictionary)
+            TermEditorSheet(mode: mode) { droppedSelfAliases in
+                if droppedSelfAliases.isEmpty {
+                    saveNotice = nil
+                } else {
+                    let quoted = droppedSelfAliases.map { "\"\($0)\"" }.joined(separator: ", ")
+                    saveNotice = "Ignored \(droppedSelfAliases.count == 1 ? "alias" : "aliases") matching the term itself: \(quoted)."
+                }
+            }
+            .environmentObject(dictionary)
         }
         .alert(
-            "Delete \"\(termPendingDeletion?.text ?? "")\"?",
+            deleteAlertTitle,
             isPresented: $isDeleteConfirmationPresented,
             presenting: termPendingDeletion
         ) { term in
-            Button("Cancel", role: .cancel) {
-                termPendingDeletion = nil
-            }
+            Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
-                termPendingDeletion = nil
                 Task {
                     do {
                         try await dictionary.deleteTerm(id: term.id)
@@ -307,21 +381,35 @@ private struct DictionarySection: View {
                 Text(term.text)
                     .font(.body.weight(.medium))
                     .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(2)
                 if !term.aliases.isEmpty {
                     Text(term.aliases.joined(separator: ", "))
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                }
+                if term.exceedsLengthLimit {
+                    Label(
+                        term.hasOversizedText
+                            ? "Term exceeds the length limit — whole entry skipped during dictation."
+                            : "\(term.oversizedAliases.count) oversized \(term.oversizedAliases.count == 1 ? "alias" : "aliases") skipped; term and other aliases still apply.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(Theme.warning)
                 }
             }
             Spacer(minLength: 0)
             Button("Edit") {
                 deleteError = nil
+                saveNotice = nil
                 editorMode = .edit(term)
             }
             .buttonStyle(NeonButtonStyle())
             .accessibilityLabel("Edit \(term.text)")
             Button(role: .destructive) {
                 deleteError = nil
+                saveNotice = nil
                 termPendingDeletion = term
                 isDeleteConfirmationPresented = true
             } label: {
@@ -337,6 +425,7 @@ private struct DictionarySection: View {
 
     private struct TermEditorSheet: View {
         let mode: EditorMode
+        let onSaved: ([String]) -> Void
         @EnvironmentObject private var dictionary: UserDictionary
         @Environment(\.dismiss) private var dismiss
 
@@ -345,8 +434,9 @@ private struct DictionarySection: View {
         @State private var errorMessage: String?
         @State private var isSaving = false
 
-        init(mode: EditorMode) {
+        init(mode: EditorMode, onSaved: @escaping ([String]) -> Void) {
             self.mode = mode
+            self.onSaved = onSaved
             switch mode {
             case .add:
                 _text = State(initialValue: "")
@@ -362,6 +452,11 @@ private struct DictionarySection: View {
             case .add: return "Add Term"
             case .edit: return "Edit Term"
             }
+        }
+
+        private var pendingSelfMatches: [String] {
+            let parsed = UserDictionary.parseAliases(aliasesText)
+            return DictionaryTerm.normalizeAliases(parsed, matchingText: text).droppedSelfMatches
         }
 
         var body: some View {
@@ -383,9 +478,20 @@ private struct DictionarySection: View {
                         .foregroundStyle(Theme.textSecondary)
                     TextField("e.g. MEC, Meg", text: $aliasesText)
                         .textFieldStyle(.roundedBorder)
-                    Text("Aliases are optional. Separate multiple aliases with commas; blank entries are ignored.")
+                    Text("Optional, up to \(DictionaryTerm.maximumLength) characters and Unicode scalars each. Duplicate or blank aliases are ignored.")
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
+                }
+
+                if !pendingSelfMatches.isEmpty {
+                    let quoted = pendingSelfMatches.map { "\"\($0)\"" }.joined(separator: ", ")
+                    Label(
+                        "Alias \(quoted) matches the term itself and will be removed.",
+                        systemImage: "info.circle"
+                    )
+                    .foregroundStyle(Theme.textSecondary)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let errorMessage {
@@ -421,16 +527,18 @@ private struct DictionarySection: View {
             guard !isSaving else { return }
             isSaving = true
             errorMessage = nil
-            let aliases = UserDictionary.parseAliases(aliasesText)
+            let parsed = UserDictionary.parseAliases(aliasesText)
+            let normalized = DictionaryTerm.normalizeAliases(parsed, matchingText: text)
             Task {
                 defer { isSaving = false }
                 do {
                     switch mode {
                     case .add:
-                        _ = try await dictionary.addTerm(text: text, aliases: aliases)
+                        _ = try await dictionary.addTerm(text: text, aliases: normalized.aliases)
                     case .edit(let term):
-                        _ = try await dictionary.updateTerm(id: term.id, text: text, aliases: aliases)
+                        _ = try await dictionary.updateTerm(id: term.id, text: text, aliases: normalized.aliases)
                     }
+                    onSaved(normalized.droppedSelfMatches)
                     dismiss()
                 } catch {
                     errorMessage = dictionary.errorMessage(for: error)

@@ -86,14 +86,16 @@ public protocol DictionaryRepository: Sendable {
 /// Synchronous SQLite work stays on this actor, never on the UI actor.
 public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
     private let directory: URL
+    private let busyTimeout: TimeInterval
     private var store: MemoryStore?
 
-    public init(directory: URL = MemoryStore.defaultDirectory) {
+    public init(directory: URL = MemoryStore.defaultDirectory, busyTimeout: TimeInterval = 5) {
         self.directory = directory
+        self.busyTimeout = busyTimeout
     }
 
     public func open() throws {
-        if store == nil { store = try MemoryStore(directory: directory) }
+        if store == nil { store = try MemoryStore(directory: directory, busyTimeout: busyTimeout) }
     }
 
     public func append(_ dictation: CompletedDictation) throws -> MemoryRecord {

@@ -5,7 +5,7 @@ import VoiceAppCore
 /// Orchestrates hotkey -> record -> transcribe -> cloud correct -> paste.
 ///
 /// Capture stays busy through transcription, correction and paste. A shortcut during
-/// correction gets the existing error sound; its key-up cannot cancel another recording.
+/// correction plays Basso when feedback sounds are enabled; its key-up cannot cancel another recording.
 @MainActor
 final class DictationController: ObservableObject {
     typealias State = DictationSessionCoordinator.State
