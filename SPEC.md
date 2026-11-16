@@ -9,6 +9,7 @@ Its whole job:
    - **Push-to-talk**: record while held, transcribe on release.
    - **Toggle-to-talk**: press once to start, press again to stop and transcribe.
 4. Paste the transcribed text into whatever app is focused.
+5. Save dictations locally by default, with a history window for search, copy, and deletion.
 
 Everything runs on-device. No accounts, no cloud.
 
@@ -33,12 +34,35 @@ Everything runs on-device. No accounts, no cloud.
   Every delete transaction rebuilds FTS on every SQLite version; `delete(ids:)` tombstones a batch with one rebuild.
   A delete rebuilds the index, so its cost grows linearly with the indexed words: with records of about 37 words,
   a single delete takes about 0.2 s at 10,000 records and about 1.1 s at 50,000. Deletes must therefore run off
-  the main thread. `PRAGMA auto_vacuum = FULL` is set before the first migration, so free pages are truncated on
+  the main thread. `PRAGMA auto_vacuum = FULL` is set only when `PRAGMA page_count` is zero, before the first migration, so free pages are truncated on
   every commit and a crash during a delete cannot leave text behind. Deleted text is removed from
   store files after close, excluding filesystem snapshots and backups.
   Named migrations use descriptive feature-qualified names in dependency order, without numbering.
   Search quotes Unicode tokens across raw/final text; only the last token is a prefix. Listing and search
-  order by creation time descending, then insertion order descending. Menu history still uses memory only.
+  order by creation time descending, then insertion order descending.
+- One background `SQLiteHistoryRepository` opens the app's store at launch. `DictationHistory` coordinates
+  delivery, the persisted **Save dictation history** preference (default on), recent items, debounced search,
+  pagination, and deletion state in `VoiceAppCore`. Paste never awaits store operations. Open/save failures
+  are logged and shown in Settings → Behavior. Completed transcriptions, including clipboard fallback,
+  save raw/final text, timestamp, app bundle ID/name captured before paste, selected model ID, and duration.
+  Audio is not retained. A dictation delivered while saving is enabled remains queued when the setting
+  is turned off; dictations delivered from then on are not saved. Existing history is kept.
+- The menu's latest three dictations survive relaunch with history enabled. **Clear recent** only hides
+  the menu list for the current launch; new dictations still appear. The menu explains whether new
+  dictations are saved on this Mac and points to Settings → Behavior. Only the history window deletes records.
+- **History…** opens a window on demand, styled with `Theme.swift`. Search is debounced by 250 ms and uses
+  the store's last-token prefix matching. Results are newest first, initially 100 with **Load more**, showing
+  date, app name, and up to three lines of final text. Copy copies the full transcript. Every delete,
+  including the Delete key, requires confirmation with a count; selected records use one batch delete.
+  **Delete all…** removes saved or queued dictations before confirmation, irrespective of search or
+  pagination. Later deliveries survive. Deletes join the save queue and run off the main thread with
+  busy/error states. Application termination, including menu Quit, logout, and updater relaunch, waits
+  for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While waiting,
+  the menu shows that it is finishing history work, disables Quit, and ignores a second menu Quit request.
+  A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
+  that fails during the wait cancels quitting and brings History forward with the error. Dictation and paste
+  remain responsive during the wait and after cancellation. Force quit, crashes, and forced shutdown
+  cannot wait. Copy is supported; re-paste is outside this slice.
 - SwiftUI `MenuBarExtra` (+ a `Settings`/`Window` scene for settings). `LSUIElement = true` (no Dock icon).
 - **WhisperKit 1.1.x** (`argmaxinc/WhisperKit`) for CoreML Whisper models: download from
   Hugging Face repo `argmaxinc/whisperkit-coreml`, load, transcribe. Sources are in
@@ -100,7 +124,7 @@ against these contracts exactly.
 
 ### Core (models, transcription, UI)
 - `App.swift` — `@main struct VoiceApp: App`. Creates the single `ModelManager` and
-  `DictationController(modelManager:)`, calls `dictation.start()` once at launch, shows
+  `DictationController(modelManager:history:)`, calls `dictation.start()` once at launch, shows
   `MenuBarExtra` whose icon reflects `dictation.state`, and a settings window.
 - `ModelCatalog.swift` — `struct TranscriptionModel: Identifiable, Hashable` + `static let all`.
 - `ModelManager.swift`:

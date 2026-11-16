@@ -1,28 +1,43 @@
 import AppKit
 import SwiftUI
+import VoiceAppCore
 
 @main
 struct VoiceApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var modelManager: ModelManager
     @StateObject private var dictation: DictationController
+    @StateObject private var history: DictationHistory
+    @StateObject private var historyWindow: HistoryWindowController
+    @StateObject private var termination: HistoryTermination
     @StateObject private var updater = Updater()
 
     init() {
         ModifierKey.registerDefaults()
         let modelManager = ModelManager()
-        let dictation = DictationController(modelManager: modelManager)
+        let history = DictationHistory()
+        let dictation = DictationController(modelManager: modelManager, history: history)
+        _history = StateObject(wrappedValue: history)
+        let historyWindow = HistoryWindowController(history: history)
+        _historyWindow = StateObject(wrappedValue: historyWindow)
+        history.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
+        let termination = HistoryTermination(history: history, showHistory: historyWindow.show)
+        _termination = StateObject(wrappedValue: termination)
+        appDelegate.termination = termination
         // Register hotkeys once the app has finished launching and the run loop is up.
         Task { @MainActor in dictation.start() }
     }
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView()
+            MenuBarView(openHistory: historyWindow.show, quit: appDelegate.requestMenuQuit)
                 .environmentObject(modelManager)
                 .environmentObject(dictation)
+                .environmentObject(history)
                 .environmentObject(updater)
+                .environmentObject(termination)
         } label: {
             MenuBarIcon(dictation: dictation, modelManager: modelManager)
         }
@@ -30,6 +45,7 @@ struct VoiceApp: App {
 
         Settings {
             SettingsView()
+                .environmentObject(history)
                 .environmentObject(modelManager)
                 .environmentObject(updater)
         }
@@ -82,4 +98,27 @@ struct MenuBarIcon: View {
         systemSymbolName: "waveform",
         accessibilityDescription: "Transcribing"
     )
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var termination: HistoryTermination?
+
+    func requestMenuQuit() {
+        // Let the SwiftUI button action return so the pending menu can repaint.
+        perform(#selector(quitFromMenu), with: nil, afterDelay: 0, inModes: [.common])
+    }
+
+    @objc private func quitFromMenu() {
+        termination?.requestQuit { NSApp.terminate(nil) }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Call NSApp.terminate from an AppKit event, never a main-actor task or main-queue block:
+        // AppKit would wait there and prevent the queue-draining task from replying.
+        let mayQuit = termination?.requestTermination { success in
+            sender.reply(toApplicationShouldTerminate: success)
+        } ?? true
+        return mayQuit ? .terminateNow : .terminateLater
+    }
 }

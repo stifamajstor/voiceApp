@@ -6,6 +6,7 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Download, switch, and delete speech models from Settings.
 - Multilingual transcription with automatic language detection or a Whisper language hint.
 - Clipboard restoration after automatic paste, with a manual-paste fallback.
+- Local dictation history with search, copy, and deletion.
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -103,6 +104,39 @@ Automatic paste temporarily places the transcript on the system clipboard. Voice
 
 Without Accessibility, the transcript stays on the clipboard and the menu reports **Copied to clipboard — grant Accessibility to auto-paste**. Paste it yourself with **⌘V**.
 
+## Dictation history
+
+**Save dictation history** is on by default in **Settings → Behavior**. Completed transcriptions,
+including clipboard-only fallback, are stored locally in
+`~/Library/Application Support/VoiceApp/store/store.sqlite`. Records include the raw and final text,
+date, target app, selected model, and recording duration. Recording audio is not retained.
+The database contains readable text; it is not encrypted by VoiceApp.
+
+Open **History…** from the menu to search, copy, or delete dictations. Results are newest first;
+the last search word matches prefixes. **Load more** shows results beyond the first 100.
+Use **⌘-click** or **⇧-click** to select several rows, then **Delete selected** or press Delete.
+Every deletion asks for confirmation with the number of dictations to remove and is permanent.
+**Delete all…** includes dictations outside the current search and those queued before confirmation;
+dictations delivered after confirmation survive. Rows preview up to three lines; Copy copies the full text.
+Search and deletion run in the background with a busy indicator; large deletes can take seconds.
+Quitting from the menu or through macOS application termination (including logout and updater relaunch)
+waits for queued saves and deletes for up to 30 seconds, then proceeds even if work remains. While
+waiting, the menu says it is finishing history work, disables Quit, and ignores a second menu Quit request.
+A delete unfinished at the deadline is not applied, and nothing reports it on the next launch. A delete
+that fails during the wait cancels quitting and brings History forward with the error; dictation and
+paste keep working meanwhile. Force quit, a crash, or a forced system shutdown cannot wait.
+Copy a transcript and paste it into the intended app yourself.
+
+The menu keeps the latest three transcripts across relaunches when history is enabled. **Clear recent**
+hides the menu's current list for this launch; it does not delete stored history. New dictations still appear.
+A dictation delivered while history is on is saved even if you turn it off while paste or storage is
+waiting. Turning history off stops saving dictations delivered from then on and stops loading saved
+records into the menu; existing records stay available in History. The menu explains the current saving
+setting and points to Settings → Behavior. An unavailable store or a failed latest save is disclosed as
+not saving; a successful save restores the saved disclosure.
+If the store cannot open or a save fails, Settings → Behavior shows recovery advice,
+and dictation and paste continue. Recent transcripts remain available in memory for this launch.
+
 ## Troubleshooting
 
 - **No Dock icon or window:** this is a menu bar app. Click its microphone icon to open Settings or quit.
@@ -152,13 +186,13 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | Path | Responsibility |
 |---|---|
 | `Sources/VoiceApp/App.swift` | App lifecycle and menu bar scene |
-| `Sources/VoiceAppCore/` | Thread-safe SQLite record store, named migrations, and full-text search |
-| `Tests/VoiceAppCoreTests/` | Store persistence, deletion, search, and concurrency tests |
+| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, search and deletion state |
+| `Tests/VoiceAppCoreTests/` | Store and history persistence, delivery isolation, search, deletion, and concurrency tests |
 | `ModelCatalog.swift`, `ModelManager.swift`, `ParakeetEngine.swift` | Model catalog, downloads, loading, and transcription |
 | `DictationController.swift`, `AudioRecorder.swift` | Dictation state and microphone capture |
 | `HotkeyManager.swift`, `ModifierHotkey.swift` | Global shortcuts |
 | `TextInserter.swift`, `Permissions.swift` | Clipboard insertion and macOS permissions |
-| `SettingsView.swift`, `MenuBarView.swift`, `Theme.swift` | Settings and menu bar interface |
+| `SettingsView.swift`, `MenuBarView.swift`, `HistoryView.swift`, `Theme.swift` | Settings, menu bar, and history interface |
 | `Updater.swift` | Sparkle self-updates |
 | `Resources/` | App metadata and icon |
 | `scripts/` | App bundle, DMG packaging, and releases |
@@ -173,7 +207,7 @@ Search treats the last word as a prefix and breaks timestamp ties by insertion o
 
 Connections enable `PRAGMA secure_delete = ON`. Every delete transaction rebuilds FTS to remove deleted terms and page-index prefixes on every SQLite version. Use `delete(ids:)` to tombstone a batch with one rebuild. Rebuilding costs more as history grows; it removes deleted text from store files after close, excluding filesystem snapshots and backups.
 
-The store is not wired into dictation yet, so the menu's last three transcripts remain in memory only.
+The app opens one store on a background actor. Dictation never waits for history I/O. The history coordinator lives in `VoiceAppCore` so delivery, preferences, debounce, stale-result rejection, and delete state can be tested without launching the app. Connections set FULL auto-vacuum only on an empty database, so reopening an existing store needs no write lock.
 
 GitHub Actions runs `swift build` and `swift test` on pull requests and pushes to `main`, using macOS 26 and Xcode 26.2 (Swift 6.2). Before shipping a change, also check the packaged app's model download/load, both dictation modes, permissions, actual transcription, paste into another app, and clipboard restoration. Core tests and signature verification alone do not prove those flows.
 

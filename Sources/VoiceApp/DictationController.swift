@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import VoiceAppCore
 
 /// Orchestrates hotkey -> record -> transcribe -> paste.
 ///
@@ -14,18 +15,7 @@ final class DictationController: ObservableObject {
         case error(String)
     }
 
-    /// A finished transcription, kept in memory only so it can be copied again from the menu.
-    struct Transcript: Identifiable, Equatable {
-        let id = UUID()
-        let text: String
-        let date: Date
-    }
-
     @Published private(set) var state: State = .idle
-    /// Newest first, capped at `historyLimit`. Not persisted.
-    @Published private(set) var recentTranscripts: [Transcript] = []
-
-    static let historyLimit = 3
 
     /// Recordings shorter than this are treated as accidental taps and dropped.
     static let minimumDuration: TimeInterval = 0.3
@@ -37,6 +27,7 @@ final class DictationController: ObservableObject {
     private enum Trigger { case pushToTalk, toggle }
 
     private let modelManager: ModelManager
+    private let history: DictationHistory
     private let recorder = AudioRecorder()
     private let hotkeys = HotkeyManager()
     private let modifierHotkeys = ModifierHotkeyMonitor()
@@ -49,8 +40,9 @@ final class DictationController: ObservableObject {
     private var transcriptionTask: Task<Void, Never>?
     private var promptedAccessibilityThisLaunch = false
 
-    init(modelManager: ModelManager) {
+    init(modelManager: ModelManager, history: DictationHistory) {
         self.modelManager = modelManager
+        self.history = history
         recorder.onInterrupted = { [weak self] in
             // Input device vanished mid-recording: transcribe what we have.
             self?.finishRecording()
@@ -190,27 +182,30 @@ final class DictationController: ObservableObject {
     // MARK: Transcription
 
     private func transcribeAndInsert(_ samples: [Float]) async {
-        let text: String
+        let modelID = modelManager.selectedModelID
+        let rawText: String
         do {
-            text = try await modelManager.transcribe(samples).trimmingCharacters(in: .whitespacesAndNewlines)
+            rawText = try await modelManager.transcribe(samples)
         } catch {
             showError("Transcription failed: \(error.localizedDescription)")
             return
         }
 
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !Self.isNonSpeechMarker(text) else {
             showError("No speech detected")
             return
         }
 
-        recentTranscripts.insert(Transcript(text: text, date: .now), at: 0)
-        if recentTranscripts.count > Self.historyLimit {
-            recentTranscripts.removeLast(recentTranscripts.count - Self.historyLimit)
-        }
-
+        let target = NSWorkspace.shared.frontmostApplication
+        let completed = CompletedDictation(rawText: rawText, finalText: text,
+            appBundleID: target?.bundleIdentifier, appName: target?.localizedName,
+            modelID: modelID, durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate)
         do {
             let keepOnClipboard = UserDefaults.standard.bool(forKey: TextInserter.keepOnClipboardKey)
-            try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
+            try await history.deliver(completed) { text in
+                try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
+            }
             state = .idle
         } catch {
             if case TextInserter.InsertError.accessibilityNotGranted = error,
@@ -226,16 +221,6 @@ final class DictationController: ObservableObject {
     private static func isNonSpeechMarker(_ text: String) -> Bool {
         guard let first = text.first, let last = text.last else { return true }
         return (first == "[" && last == "]") || (first == "(" && last == ")")
-    }
-
-    // MARK: History
-
-    func copyToClipboard(_ transcript: Transcript) {
-        TextInserter.copy(transcript.text)
-    }
-
-    func clearHistory() {
-        recentTranscripts.removeAll()
     }
 
     // MARK: Helpers

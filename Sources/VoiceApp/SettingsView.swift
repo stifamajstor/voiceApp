@@ -1,10 +1,12 @@
 import Combine
 import KeyboardShortcuts
 import SwiftUI
+import VoiceAppCore
 
 struct SettingsView: View {
     @EnvironmentObject private var modelManager: ModelManager
     @EnvironmentObject private var updater: Updater
+    @EnvironmentObject private var history: DictationHistory
     @AppStorage(ModifierKey.Action.pushToTalk.defaultsKey) private var pushToTalkModifier = ModifierKey.rightOption.rawValue
     @AppStorage(ModifierKey.Action.toggleToTalk.defaultsKey) private var toggleModifier = ModifierKey.none.rawValue
 
@@ -74,10 +76,23 @@ struct SettingsView: View {
             Section {
                 Toggle("Keep transcript on clipboard after pasting", isOn: $keepOnClipboard)
                 Toggle("Play start/stop sounds", isOn: $playFeedbackSounds)
+                Toggle("Save dictation history", isOn: $history.saveEnabled)
+                if history.isOpening {
+                    Label("Opening dictation history…", systemImage: "hourglass")
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                if let error = history.storeError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.warning)
+                }
+                if let error = history.saveError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.warning)
+                }
             } header: {
                 SectionTitle("Behavior")
             } footer: {
-                Text("By default, VoiceApp restores your previous clipboard after pasting.")
+                Text("By default, VoiceApp restores your previous clipboard after pasting. History is saved locally; turning it off keeps existing records. Open History from the menu to search or delete them.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             }

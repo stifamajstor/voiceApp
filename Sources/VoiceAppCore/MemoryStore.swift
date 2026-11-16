@@ -3,11 +3,24 @@ import Foundation
 import GRDB
 
 public final class MemoryStore: Sendable {
-    public enum StoreError: Error, Equatable {
+    public enum StoreError: LocalizedError, Equatable {
         case invalidAudioExtension
         case invalidDuration
         case missingDeviceID
         case migrationLockTimeout
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidAudioExtension:
+                return "The audio file extension is invalid."
+            case .invalidDuration:
+                return "The recording duration must be finite and nonnegative."
+            case .missingDeviceID:
+                return "The history store is missing its device identity."
+            case .migrationLockTimeout:
+                return "Timed out waiting for another process to open the history store. Relaunch VoiceApp to try again."
+            }
+        }
     }
 
     public static var defaultDirectory: URL {
@@ -38,9 +51,11 @@ public final class MemoryStore: Sendable {
         var configuration = Configuration()
         configuration.busyMode = .timeout(5)
         configuration.prepareDatabase { db in
-            // Only takes effect while the file is empty, so it must run before the first migration. FULL truncates
-            // free pages on every commit; a hot-journal rollback after a crash would not scrub reused free pages.
-            try db.execute(sql: "PRAGMA auto_vacuum = FULL")
+            // Setting this on an existing file takes a write lock, even when the mode is unchanged.
+            // FULL must be set before migration so free pages are truncated on every commit.
+            if try Int.fetchOne(db, sql: "PRAGMA page_count") == 0 {
+                try db.execute(sql: "PRAGMA auto_vacuum = FULL")
+            }
             try db.execute(sql: "PRAGMA secure_delete = ON")
         }
         database = try DatabaseQueue(path: self.directory.appending(path: "store.sqlite").path, configuration: configuration)
@@ -58,6 +73,7 @@ public final class MemoryStore: Sendable {
 
     @discardableResult
     public func append(
+        id: UUID = UUID(),
         kind: RecordKind = .dictation,
         createdAt: Date = .now,
         rawText: String,
@@ -72,7 +88,6 @@ public final class MemoryStore: Sendable {
         if let durationSeconds, !durationSeconds.isFinite || durationSeconds < 0 {
             throw StoreError.invalidDuration
         }
-        let id = UUID()
         let audioPath = try audioExtension.map { "audio/\(id.uuidString).\(try Self.validatedAudioExtension($0))" }
         // Match the timestamp precision restored from SQLite's Unix-epoch REAL.
         let record = MemoryRecord(
@@ -85,6 +100,13 @@ public final class MemoryStore: Sendable {
         return try database.write { db in
             try record.insert(db)
             return record
+        }
+    }
+
+    public func count(kind: RecordKind) throws -> Int {
+        try database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM records WHERE kind = ? AND deletedAt IS NULL",
+                             arguments: [kind.rawValue]) ?? 0
         }
     }
 
