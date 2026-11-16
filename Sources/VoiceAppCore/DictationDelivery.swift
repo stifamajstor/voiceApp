@@ -29,7 +29,7 @@ public final class DictationDelivery {
         modelID: String,
         durationSeconds: Double,
         destination: CaptureDestination = .dictation,
-        willCorrect: () -> Void = {},
+        willCorrect: @escaping @MainActor () -> Void = {},
         paste: (String) async throws -> Void
     ) async throws -> Bool {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -49,13 +49,18 @@ public final class DictationDelivery {
         // Voice notes (.note) bypass cloud correction and remain guarded against accidental routing.
         let outcome: CorrectionOutcome
         if let cloudCorrection, kind == .dictation {
-            willCorrect()
+            var correctionCompleted = false
+            defer { correctionCompleted = true }
             outcome = await cloudCorrection.correct(
                 dictionaryText,
                 dictionaryTerms: dictionary.terms.map(\.text),
                 protectedRanges: protectedRanges,
                 appBundleID: appBundleID,
-                appName: appName
+                appName: appName,
+                willSendRequest: {
+                    guard !correctionCompleted else { return }
+                    willCorrect()
+                }
             )
         } else {
             outcome = CorrectionOutcome(outputText: dictionaryText)

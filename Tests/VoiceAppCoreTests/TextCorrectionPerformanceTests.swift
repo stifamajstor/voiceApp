@@ -60,6 +60,48 @@ final class TextCorrectionPerformanceTests: XCTestCase {
             XCTAssertTrue(result.converged)
         }
         print("DICTIONARY BENCH REUSED terms=500 aliases=2 words=1200 mode=fixed-point reused_median_ms=\(String(format: "%.3f", longTimes.sorted()[10])) reused_worst_ms=\(String(format: "%.3f", longTimes.max() ?? 0))")
+
+        let terms2000 = dictionary(count: 2_000)
+        let matcher2000 = CorrectionMatcher(terms: terms2000)
+        let input300 = (0..<300).map { paragraph[$0 % paragraph.count] }.joined(separator: " ")
+        for _ in 0..<3 { _ = matcher2000.correct(input300) }
+        var times2000: [Double] = []
+        for _ in 0..<21 {
+            let start = ContinuousClock.now
+            let result = matcher2000.correct(input300)
+            let elapsed = start.duration(to: .now).components
+            times2000.append(Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+            XCTAssertTrue(result.converged)
+            XCTAssertFalse(result.timedOut)
+        }
+        print("DICTIONARY BENCH REUSED terms=2000 aliases=2 words=300 mode=fixed-point reused_median_ms=\(String(format: "%.3f", times2000.sorted()[10])) reused_worst_ms=\(String(format: "%.3f", times2000.max() ?? 0))")
+
+        // Pathological case 1: legacy oversized term ("lorem " * 1000 + "ipsum" <- "the") skipped by matcher.
+        let loremTerm = DictionaryTerm(text: String(repeating: "lorem ", count: 1_000) + "ipsum", aliases: ["the"], deviceID: UUID())
+        let loremMatcher = CorrectionMatcher(terms: [loremTerm])
+        let loremStart = ContinuousClock.now
+        let loremResult = loremMatcher.correct(input300)
+        let loremElapsed = loremStart.duration(to: .now).components
+        let loremMs = Double(loremElapsed.seconds) * 1_000 + Double(loremElapsed.attoseconds) / 1e15
+        XCTAssertEqual(loremResult.text, input300)
+        XCTAssertFalse(loremResult.timedOut)
+        print("DICTIONARY BENCH PATHOLOGICAL lorem_x1000 ms=\(String(format: "%.3f", loremMs)) output_chars=\(loremResult.text.count)")
+
+        // Pathological case 2: valid <=100-char multi-pass growth chain that would otherwise exceed 50ms -> bounded & raw fallback.
+        let chainTerms = [
+            DictionaryTerm(text: "c a a", aliases: ["a"], deviceID: UUID()),
+            DictionaryTerm(text: "a a c b", aliases: ["a c c a"], deviceID: UUID()),
+            DictionaryTerm(text: "b c c c", aliases: ["c a a c"], deviceID: UUID()),
+        ]
+        let chainMatcher = CorrectionMatcher(terms: chainTerms)
+        let chainInput = String(repeating: "c b a a ", count: 2_000)
+        let chainStart = ContinuousClock.now
+        let chainResult = chainMatcher.correct(chainInput)
+        let chainElapsed = chainStart.duration(to: .now).components
+        let chainMs = Double(chainElapsed.seconds) * 1_000 + Double(chainElapsed.attoseconds) / 1e15
+        XCTAssertEqual(chainResult.text, chainInput)
+        XCTAssertTrue(chainResult.timedOut)
+        print("DICTIONARY BENCH PATHOLOGICAL chain_2000x_cbaa ms=\(String(format: "%.3f", chainMs)) timedOut=\(chainResult.timedOut) output_chars=\(chainResult.text.count)")
     }
 
     private func dictionary(count: Int) -> [DictionaryTerm] {

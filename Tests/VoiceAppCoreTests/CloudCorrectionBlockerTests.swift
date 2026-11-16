@@ -6,7 +6,7 @@ import XCTest
 final class CloudCorrectionBlockerTests: XCTestCase {
     func testRejectsNewInvisibleScalarsAndNonSpaceWhitespace() throws {
         for scalar in [0x200B, 0x200D, 0x200C, 0x202E, 0x2066, 0x2069, 0xFEFF, 0x00AD,
-                       0xE0041, 0x180E, 0x034F, 0xFE0F, 0x00A0, 0x202F, 0x2007] {
+                       0xE0041, 0x180E, 0x034F, 0xFE0F, 0x00A0, 0x202F, 0x2007, 0x2800] {
             let replacement = "sta" + String(Unicode.Scalar(scalar)!) + "tus"
             XCTAssertThrowsError(try CorrectionEditValidator.apply(
                 [CorrectionEdit(original: "status", replacement: replacement)],
@@ -14,6 +14,9 @@ final class CloudCorrectionBlockerTests: XCTestCase {
         }
         XCTAssertThrowsError(try CorrectionEditValidator.apply(
             [CorrectionEdit(original: "git status", replacement: "git\u{A0}status")],
+            to: "please run git status now"))
+        XCTAssertThrowsError(try CorrectionEditValidator.apply(
+            [CorrectionEdit(original: "git status", replacement: "git\u{2800}status")],
             to: "please run git status now"))
     }
 

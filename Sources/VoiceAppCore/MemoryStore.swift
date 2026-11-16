@@ -32,7 +32,7 @@ public final class MemoryStore: Sendable {
     public let deviceID: UUID
     private let database: DatabaseQueue
 
-    public init(directory: URL = MemoryStore.defaultDirectory) throws {
+    public init(directory: URL = MemoryStore.defaultDirectory, busyTimeout: TimeInterval = 5) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.directory = directory.standardizedFileURL.resolvingSymlinksInPath()
         // GRDB reads migration state before taking its write lock, so first opens must serialize migrations.
@@ -40,7 +40,7 @@ public final class MemoryStore: Sendable {
             O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
         guard migrationLock >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { Darwin.close(migrationLock) }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(busyTimeout))
         while flock(migrationLock, LOCK_EX | LOCK_NB) != 0 {
             guard errno == EWOULDBLOCK || errno == EINTR else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
@@ -49,7 +49,7 @@ public final class MemoryStore: Sendable {
             Thread.sleep(forTimeInterval: 0.01)
         }
         var configuration = Configuration()
-        configuration.busyMode = .timeout(5)
+        configuration.busyMode = .timeout(busyTimeout)
         configuration.prepareDatabase { db in
             // Setting this on an existing file takes a write lock, even when the mode is unchanged.
             // FULL must be set before migration so free pages are truncated on every commit.
@@ -272,7 +272,7 @@ public final class MemoryStore: Sendable {
     @discardableResult
     public func addTerm(text: String, aliases: [String] = []) throws -> DictionaryTerm {
         let trimmedText = DictionaryTerm.trimEdgeWhitespace(text)
-        let trimmedAliases = Self.normalizedAliases(aliases)
+        let trimmedAliases = DictionaryTerm.normalizeAliases(aliases, matchingText: trimmedText).aliases
         return try database.write { db in
             try Self.validateTerm(text: trimmedText, aliases: trimmedAliases, excluding: nil, in: db)
             let term = DictionaryTerm(text: trimmedText, aliases: trimmedAliases, deviceID: deviceID)
@@ -284,7 +284,7 @@ public final class MemoryStore: Sendable {
     @discardableResult
     public func updateTerm(id: UUID, text: String, aliases: [String]) throws -> DictionaryTerm {
         let trimmedText = DictionaryTerm.trimEdgeWhitespace(text)
-        let trimmedAliases = Self.normalizedAliases(aliases)
+        let trimmedAliases = DictionaryTerm.normalizeAliases(aliases, matchingText: trimmedText).aliases
         return try database.write { db in
             guard var term = try DictionaryTerm.fetchOne(db,
                 sql: "SELECT * FROM dictionaryTerms WHERE id = ? AND deletedAt IS NULL",
@@ -326,13 +326,6 @@ public final class MemoryStore: Sendable {
         }
     }
 
-    private static func normalizedAliases(_ aliases: [String]) -> [String] {
-        aliases.compactMap { alias in
-            let trimmed = DictionaryTerm.trimEdgeWhitespace(alias)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-    }
-
     private static func nextTermDate(after previous: Date) -> Date {
         // Keep rapid edits ordered even if the wall clock moves backwards.
         Date(timeIntervalSince1970: max(Date.now.timeIntervalSince1970, previous.timeIntervalSince1970 + 0.000001))
@@ -340,6 +333,12 @@ public final class MemoryStore: Sendable {
 
     private static func validateTerm(text: String, aliases: [String], excluding id: UUID?, in db: Database) throws {
         guard !DictionaryTerm.matchKey(text).isEmpty else { throw DictionaryError.emptyText }
+        guard text.count <= DictionaryTerm.maximumLength else {
+            throw DictionaryError.textTooLong(limit: DictionaryTerm.maximumLength)
+        }
+        for alias in aliases where alias.count > DictionaryTerm.maximumLength {
+            throw DictionaryError.aliasTooLong(value: alias, limit: DictionaryTerm.maximumLength)
+        }
         let existing = try DictionaryTerm.fetchAll(db,
             sql: "SELECT * FROM dictionaryTerms WHERE deletedAt IS NULL ORDER BY id")
         var owners: [String: UUID] = [:]

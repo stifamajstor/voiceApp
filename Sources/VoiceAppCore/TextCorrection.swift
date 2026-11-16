@@ -14,11 +14,23 @@ public struct TextCorrectionResult: Equatable, Sendable {
     public let text: String
     public let replacements: [TextReplacement]
     public let converged: Bool
+    public let timedOut: Bool
+
+    public init(text: String, replacements: [TextReplacement], converged: Bool, timedOut: Bool = false) {
+        self.text = text
+        self.replacements = replacements
+        self.converged = converged
+        self.timedOut = timedOut
+    }
 }
 
-/// Applies up to eight longest-match passes. A false convergence flag means a pass or growth limit was reached.
-public func correctText(_ text: String, terms: [DictionaryTerm]) -> TextCorrectionResult {
-    CorrectionMatcher(terms: terms).correct(text)
+/// Applies up to eight longest-match passes. A false convergence flag means a pass, growth, or time limit was reached.
+public func correctText(
+    _ text: String,
+    terms: [DictionaryTerm],
+    timeBudget: Duration? = CorrectionMatcher.defaultTimeBudget
+) -> TextCorrectionResult {
+    CorrectionMatcher(terms: terms).correct(text, timeBudget: timeBudget)
 }
 
 private struct DictionaryCorrectionEdit {
@@ -35,6 +47,7 @@ private struct CorrectionSource {
 /// Prebuilt dictionary matcher that can be reused across dictations until terms change.
 public struct CorrectionMatcher: Sendable {
     public static let empty = CorrectionMatcher(terms: [])
+    public static let defaultTimeBudget: Duration = .milliseconds(50)
 
     private struct Node: Sendable {
         var children: [Unicode.Scalar: Int] = [:]
@@ -47,13 +60,16 @@ public struct CorrectionMatcher: Sendable {
         let locale = Locale(identifier: "en_US_POSIX")
         for term in terms {
             let trimmedText = DictionaryTerm.trimEdgeWhitespace(term.text)
-            guard term.deletedAt == nil, !trimmedText.isEmpty else { continue }
+            guard term.deletedAt == nil,
+                  !trimmedText.isEmpty,
+                  trimmedText.count <= DictionaryTerm.maximumLength else { continue }
             var normalizedTerm = term
             normalizedTerm.text = trimmedText
             var seen: Set<String> = []
             for value in [trimmedText] + term.aliases {
                 let trimmedValue = DictionaryTerm.trimEdgeWhitespace(value)
-                guard !trimmedValue.isEmpty else { continue }
+                guard !trimmedValue.isEmpty,
+                      trimmedValue.count <= DictionaryTerm.maximumLength else { continue }
                 let folded = trimmedValue.folding(options: .caseInsensitive, locale: locale)
                     .precomposedStringWithCanonicalMapping
                 var scalars: [Unicode.Scalar] = []
@@ -83,11 +99,23 @@ public struct CorrectionMatcher: Sendable {
         }
     }
 
-    /// Applies up to eight longest-match passes. A false convergence flag means a pass or growth limit was reached.
-    public func correct(_ text: String) -> TextCorrectionResult {
+    /// Applies up to eight longest-match passes. If `timeBudget` is exceeded, returns the raw input text.
+    public func correct(
+        _ text: String,
+        timeBudget: Duration? = Self.defaultTimeBudget,
+        now: () -> ContinuousClock.Instant = { ContinuousClock.now }
+    ) -> TextCorrectionResult {
         guard !text.isEmpty, !nodes[0].children.isEmpty else {
             return TextCorrectionResult(text: text, replacements: [], converged: true)
         }
+        let deadline = timeBudget.map { now().advanced(by: $0) }
+        func isTimedOut() -> Bool {
+            guard let deadline else { return false }
+            return now() >= deadline
+        }
+        let rawTimedOutResult = TextCorrectionResult(text: text, replacements: [], converged: false, timedOut: true)
+        if isTimedOut() { return rawTimedOutResult }
+
         let original = text as NSString
         var output = text
         var sources = (0..<original.length).map {
@@ -98,7 +126,10 @@ public struct CorrectionMatcher: Sendable {
         var generation = 0
         var converged = false
         for _ in 0..<8 {
-            let edits = edits(in: output)
+            if isTimedOut() { return rawTimedOutResult }
+            guard let edits = edits(in: output, isTimedOut: isTimedOut) else {
+                return rawTimedOutResult
+            }
             if edits.isEmpty {
                 converged = true
                 break
@@ -118,7 +149,8 @@ public struct CorrectionMatcher: Sendable {
             nextUnits.reserveCapacity(length)
             nextSources.reserveCapacity(length)
             var cursor = 0
-            for edit in edits {
+            for (index, edit) in edits.enumerated() {
+                if (index & 255) == 0, isTimedOut() { return rawTimedOutResult }
                 nextUnits.append(contentsOf: units[cursor..<edit.range.location])
                 nextSources.append(contentsOf: sources[cursor..<edit.range.location])
                 let end = NSMaxRange(edit.range)
@@ -140,18 +172,28 @@ public struct CorrectionMatcher: Sendable {
             sources = nextSources
         }
         // The eighth pass may itself reach the fixed point; checking does not apply a ninth pass.
-        if !converged { converged = edits(in: output).isEmpty }
+        if !converged {
+            if isTimedOut() { return rawTimedOutResult }
+            guard let remaining = edits(in: output, isTimedOut: isTimedOut) else {
+                return rawTimedOutResult
+            }
+            converged = remaining.isEmpty
+        }
+        if isTimedOut() { return rawTimedOutResult }
         return TextCorrectionResult(text: output,
             replacements: mergedReplacements(original: original, output: output as NSString, sources: sources),
             converged: converged)
     }
 
-    private func edits(in text: String) -> [DictionaryCorrectionEdit] {
+    private func edits(in text: String, isTimedOut: () -> Bool) -> [DictionaryCorrectionEdit]? {
         let string = text as NSString
-        let boundaries = WordBoundaries(text)
-        let units = normalizedUnits(text)
+        guard let boundaries = WordBoundaries(text, isTimedOut: isTimedOut),
+              let units = normalizedUnits(text, isTimedOut: isTimedOut) else {
+            return nil
+        }
         var candidates: [DictionaryCorrectionEdit] = []
         for start in units.indices where units[start].isStart && boundaries.allowsStart(units[start].range.location) {
+            if (start & 255) == 0, isTimedOut() { return nil }
             var node = 0
             var end = start
             while end < units.count, let child = nodes[node].children[units[end].scalar] {
@@ -166,6 +208,7 @@ public struct CorrectionMatcher: Sendable {
                 end += 1
             }
         }
+        if isTimedOut() { return nil }
         candidates.sort {
             if $0.range.length != $1.range.length { return $0.range.length > $1.range.length }
             if $0.range.location != $1.range.location { return $0.range.location < $1.range.location }
@@ -174,7 +217,8 @@ public struct CorrectionMatcher: Sendable {
         }
         var occupied = Array(repeating: false, count: string.length)
         var edits: [DictionaryCorrectionEdit] = []
-        for candidate in candidates {
+        for (index, candidate) in candidates.enumerated() {
+            if (index & 255) == 0, isTimedOut() { return nil }
             let range = candidate.range.location..<NSMaxRange(candidate.range)
             guard !occupied[range].contains(true) else { continue }
             for index in range { occupied[index] = true }
@@ -193,11 +237,14 @@ private struct CorrectionUnit {
     let isEnd: Bool
 }
 
-private func normalizedUnits(_ text: String) -> [CorrectionUnit] {
+private func normalizedUnits(_ text: String, isTimedOut: () -> Bool) -> [CorrectionUnit]? {
     var units: [CorrectionUnit] = []
     let locale = Locale(identifier: "en_US_POSIX")
     var offset = 0
+    var charCount = 0
     for character in text {
+        if (charCount & 1023) == 0, isTimedOut() { return nil }
+        charCount += 1
         let value = String(character)
         let range = NSRange(location: offset, length: value.utf16.count)
         offset += range.length
@@ -224,10 +271,13 @@ private struct WordBoundaries {
     private var word: [Bool] = []
     private var joiner: [Bool] = []
 
-    init(_ text: String) {
+    init?(_ text: String, isTimedOut: () -> Bool) {
         word.reserveCapacity(text.utf16.count)
         joiner.reserveCapacity(text.utf16.count)
+        var scalarCount = 0
         for scalar in text.unicodeScalars {
+            if (scalarCount & 1023) == 0, isTimedOut() { return nil }
+            scalarCount += 1
             let isWord: Bool
             switch scalar.properties.generalCategory {
             case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
@@ -237,7 +287,7 @@ private struct WordBoundaries {
             default:
                 isWord = false
             }
-            let isJoiner = "'’‐‑-".unicodeScalars.contains(scalar)
+            let isJoiner = "'’\u{2010}\u{2011}-".unicodeScalars.contains(scalar)
             for _ in scalar.utf16 {
                 word.append(isWord)
                 joiner.append(isJoiner)

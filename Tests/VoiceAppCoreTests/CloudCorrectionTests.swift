@@ -1276,6 +1276,88 @@ final class CloudCorrectionTests: XCTestCase {
         }
     }
 
+    func testCorrectingStateOnlyEnteredWhenCloudRequestWillSend() async throws {
+        let transport = StubHTTPTransport { request in
+            let url = try XCTUnwrap(request.url)
+            let payload = """
+            {"content":[{"type":"text","text":"{\\"edits\\":[]}"}],"stop_reason":"end_turn"}
+            """
+            return httpResponse(url: url, statusCode: 200, body: payload)
+        }
+        let secrets = InMemorySecretStore()
+        try secrets.write("sk-ant-signal", account: CloudProviderID.anthropic.rawValue)
+        let service = CloudCorrectionService(secretStore: secrets, transport: transport, defaults: defaults)
+        service.addExcludedBundleID("com.apple.Terminal")
+
+        let repository = SQLiteHistoryRepository(directory: directory)
+        let history = DictationHistory(repository: repository, notifications: FakeNotifications(), defaults: defaults)
+        let dictionary = UserDictionary(repository: repository)
+        await history.start().value
+        await dictionary.start().value
+        let delivery = DictationDelivery(history: history, dictionary: dictionary, cloudCorrection: service)
+
+        func runDeliver(text: String, bundleID: String?) async throws -> (willCorrectCalls: Int, busyCalls: Int, stateDuringPaste: DictationSessionCoordinator.State) {
+            let session = DictationSessionCoordinator()
+            XCTAssertTrue(session.beginRecording(trigger: .pushToTalk))
+            XCTAssertTrue(session.beginTranscribing())
+            var willCorrectCalls = 0
+            var busyCalls = 0
+            var stateDuringPaste: DictationSessionCoordinator.State = .idle
+            _ = try await delivery.deliver(
+                rawText: text,
+                appBundleID: bundleID,
+                appName: nil,
+                modelID: "test",
+                durationSeconds: 1.0,
+                willCorrect: {
+                    willCorrectCalls += 1
+                    session.beginCorrecting()
+                }
+            ) { _ in
+                stateDuringPaste = session.state
+                XCTAssertFalse(session.beginRecording(trigger: .pushToTalk, onBusy: { busyCalls += 1 }))
+            }
+            session.finishTranscribing()
+            return (willCorrectCalls, busyCalls, stateDuringPaste)
+        }
+
+        // 1. Disabled (default): no .correcting state and silent busy press during paste.
+        let off = try await runDeliver(text: "I would load it today", bundleID: "com.apple.Notes")
+        XCTAssertEqual(off.willCorrectCalls, 0)
+        XCTAssertEqual(off.busyCalls, 0)
+        XCTAssertEqual(off.stateDuringPaste, .transcribing)
+
+        // 2. Enabled, excluded app: skipped before request -> no .correcting.
+        service.isEnabled = true
+        let excluded = try await runDeliver(text: "I would load it today", bundleID: "com.apple.Terminal")
+        XCTAssertEqual(excluded.willCorrectCalls, 0)
+        XCTAssertEqual(excluded.busyCalls, 0)
+        XCTAssertEqual(excluded.stateDuringPaste, .transcribing)
+
+        // 3. Enabled, short (< 3 words): skipped before Keychain/request -> no .correcting.
+        let short = try await runDeliver(text: "Thank you", bundleID: "com.apple.Notes")
+        XCTAssertEqual(short.willCorrectCalls, 0)
+        XCTAssertEqual(short.busyCalls, 0)
+        XCTAssertEqual(short.stateDuringPaste, .transcribing)
+
+        // 4. Enabled, missing API key: returns without sending -> no .correcting.
+        try service.removeAPIKey()
+        let missingKey = try await runDeliver(text: "I would load it today", bundleID: "com.apple.Notes")
+        XCTAssertEqual(missingKey.willCorrectCalls, 0)
+        XCTAssertEqual(missingKey.busyCalls, 0)
+        XCTAssertEqual(missingKey.stateDuringPaste, .transcribing)
+
+        // 5. Enabled with API key, allowed app, >= 3 words: request WILL send -> enters .correcting.
+        try service.saveAPIKey("sk-ant-signal")
+        let active = try await runDeliver(text: "I would load it today", bundleID: "com.apple.Notes")
+        XCTAssertEqual(active.willCorrectCalls, 1)
+        XCTAssertEqual(active.busyCalls, 1)
+        XCTAssertEqual(active.stateDuringPaste, .correcting)
+        XCTAssertEqual(transport.requestCount, 1)
+
+        await history.pendingSave?.value
+    }
+
 }
 
 private func jsonObject(from data: Data?) throws -> [String: Any] {

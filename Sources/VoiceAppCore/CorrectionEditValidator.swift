@@ -251,6 +251,7 @@ public enum CorrectionEditValidator {
         scalar.properties.generalCategory == .format
             || scalar.properties.isDefaultIgnorableCodePoint
             || (scalar.properties.isWhitespace && scalar != " ")
+            || scalar == "\u{2800}"
     }
 
     private static func controlOrNewlineScalars(in text: String) -> [Unicode.Scalar] {

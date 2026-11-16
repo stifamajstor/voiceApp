@@ -157,15 +157,20 @@ case-insensitively using an in-memory matcher rebuilt only when the dictionary c
 correction adds no store I/O to dictation or paste. Voice notes use the same correction before saving,
 keeping both the raw transcript and corrected text without pasting.
 
-Leading and trailing whitespace is trimmed from term text and aliases, and blank aliases are
-dropped. Duplicate terms or conflicting aliases are rejected with plain-English messages.
-Deleting a term asks for confirmation. When the dictionary has 8 or more terms, a search
-field filters by term or alias.
+Term text and aliases are limited to **100 characters** each (after trimming edge whitespace).
+Longer entries, duplicate terms, and conflicting aliases are rejected with plain-English messages;
+pre-existing longer rows in SQLite remain visible and flagged in Settings while skipped by the matcher.
+Blank and duplicate aliases within a term are collapsed, and aliases matching the term's own text are
+dropped with a note. The matcher also enforces a **50 ms** wall-clock budget per dictation, falling
+back to the raw transcript and logging if exceeded. Deleting a term asks for confirmation. When the
+dictionary has 8 or more terms, a search field filters by term or alias.
 
 Terms are stored locally in the same `~/Library/Application Support/VoiceApp/store/store.sqlite`
 database as dictation history. History records keep both the raw transcript and the corrected text,
-and history search matches both. If the dictionary cannot be loaded, VoiceApp logs the cause,
-shows a warning in **Settings → Dictionary**, and pastes the raw transcript.
+and history search matches both. If the dictionary database is locked or cannot be opened at launch,
+VoiceApp logs the cause, shows the status with a **Retry** button in **Settings → Dictionary**,
+pastes the raw transcript immediately without blocking, and retries automatically with backoff (as well
+as on the next dictation).
 
 ## Voice notes
 
@@ -212,7 +217,7 @@ Responses API with `reasoning.effort: "none"` and `store: false`) model before p
 - **Non-blocking deadline & Keychain reads:** Reading the API key from Keychain (`interactionNotAllowed`) and the network request both run off the main actor under a single 2-second wall-clock deadline (`CloudCorrectionConfig.requestDeadline`). Reads request no UI interaction. If the read fails or the deadline expires, VoiceApp delivers the dictionary text and discards late responses. The current dictation stays busy through correction and paste. A hung system Keychain read cannot be cancelled: it can leave one worker thread blocked per attempted read until the system call returns; paste still meets the deadline. Suppression of legacy login-Keychain ACL/unlock dialogs has not been verified.
 - **Short dictations:** Fewer than 3 words (using the validator’s Unicode word tokenizer) skip Keychain and network access, record `skipped: too short`, and do not affect the circuit breaker.
 - **Circuit breaker:** After 3 consecutive request or validation failures, cloud correction pauses for 5 minutes and falls back to dictionary text without network calls.
-- **Structured edit contract:** Models receive system instructions explicitly separating untrusted JSON user-message data (`target_app`, `dictionary_terms`, `transcript`) and return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically on whole Unicode words and extended grapheme clusters, protects dictionary-replaced words, rejects new format (Cf) and default-ignorable scalars, non-space whitespace, leading combining marks/joiners, grapheme joins across edit edges, control characters/newlines, leading/trailing whitespace changes, or new shell characters (`> < | & ; $ \` \`), rejects ambiguous or overlapping spans, bounds per-edit length/word expansion, and requires dictations to have at least 3 words while capping changed words at `floor(totalWords * 0.40)` using a diff of the entire transcript’s word tokens. Existing invisible scalars must remain in identical graphemes.
+- **Structured edit contract:** Models receive system instructions explicitly separating untrusted JSON user-message data (`target_app`, `dictionary_terms`, `transcript`) and return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically on whole Unicode words and extended grapheme clusters, protects dictionary-replaced words, rejects new format (Cf), default-ignorable, and braille blank (`U+2800`) scalars, non-space whitespace, leading combining marks/joiners, grapheme joins across edit edges, control characters/newlines, leading/trailing whitespace changes, or new shell characters (`> < | & ; $ \` \`), rejects ambiguous or overlapping spans, bounds per-edit length/word expansion, and requires dictations to have at least 3 words while capping changed words at `floor(totalWords * 0.40)` using a diff of the entire transcript’s word tokens. Existing invisible scalars must remain in identical graphemes.
 - **Models and testing:** Settings populates the model picker from each provider's `GET /v1/models` endpoint (OpenAI is filtered to a short allowlist of fast `reasoning.effort: "none"` models: `gpt-6-luna`, `gpt-6.1-terra`) and includes a **Test** button that sends a short sample and displays latency or errors in plain words.
 - **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. Voice notes (`RecordKind.note`) never run through this dictation pass; they save dictionary text with NULL cloud metadata and save without pasting. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
 

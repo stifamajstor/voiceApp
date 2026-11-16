@@ -105,19 +105,64 @@ final class TextCorrectionTests: XCTestCase {
     }
 
     func testGrowthBudgetStopsBeforeAllocatingAnOversizedReplacement() {
-        let input = String(repeating: "x ", count: 2_000)
-        let result = correctText(input, terms: [term(String(repeating: "z", count: 1_024), ["x"])])
+        let input = String(repeating: "x ", count: 12_000)
+        let result = correctText(
+            input,
+            terms: [term(String(repeating: "z", count: DictionaryTerm.maximumLength), ["x"])],
+            timeBudget: nil
+        )
         XCTAssertEqual(result.text, input)
         XCTAssertEqual(result.replacements, [])
         XCTAssertFalse(result.converged)
+        XCTAssertFalse(result.timedOut)
     }
 
     func testCanonicalPunctuationCommonWordAliasesAndLongLiteral() {
         XCTAssertEqual(correctText("c++ .net A|B (X) \\D", terms: [term("C++"), term(".NET"), term("a|b"), term("(x)"), term(#"\d"#)]).text,
             #"C++ .NET a|b (x) \d"#)
         XCTAssertEqual(correctText("send it to Meg", terms: [term("Mac", ["Meg"])]).text, "send it to Mac")
-        let long = String(repeating: "ž", count: 50_000)
+        let long = String(repeating: "ž", count: DictionaryTerm.maximumLength)
         XCTAssertEqual(correctText(long.uppercased(), terms: [term(long)]).text, long)
+    }
+
+    func testOversizedTermAndAliasAreSkippedByMatcherWithoutBlockingNormalTerms() {
+        let oversizedText = String(repeating: "lorem ", count: 1_000) + "ipsum"
+        let oversizedAlias = String(repeating: "x", count: DictionaryTerm.maximumLength + 1)
+        let terms = [
+            term(oversizedText, ["the"]),
+            term("Mac", [oversizedAlias, "MEC"]),
+        ]
+        let input = "the \(oversizedAlias) MEC"
+        let result = correctText(input, terms: terms)
+        XCTAssertEqual(result.text, "the \(oversizedAlias) Mac")
+        XCTAssertEqual(result.replacements.map(\.original), ["MEC"])
+        XCTAssertTrue(result.converged)
+        XCTAssertFalse(result.timedOut)
+    }
+
+    func testTimeBudgetExceededReturnsRawTextAndTimedOutFlag() {
+        let terms = [
+            term("c a a", ["a"]),
+            term("a a c b", ["a c c a"]),
+            term("b c c c", ["c a a c"]),
+        ]
+        let matcher = CorrectionMatcher(terms: terms)
+        let input = "c b a a"
+        let start = ContinuousClock.now
+        var tick = 0
+        let timedOut = matcher.correct(input, timeBudget: .milliseconds(50)) {
+            defer { tick += 1 }
+            return tick == 0 ? start : start.advanced(by: .milliseconds(60))
+        }
+        XCTAssertEqual(timedOut.text, input)
+        XCTAssertEqual(timedOut.replacements, [])
+        XCTAssertFalse(timedOut.converged)
+        XCTAssertTrue(timedOut.timedOut)
+
+        // With generous budget the same input still completes normally.
+        let normal = matcher.correct(input, timeBudget: .seconds(5))
+        XCTAssertFalse(normal.timedOut)
+        XCTAssertFalse(normal.replacements.isEmpty)
     }
 
     func testCaseFoldingAndCombiningCharactersKeepWholeGraphemeRanges() {

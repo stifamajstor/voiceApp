@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 @testable import VoiceAppCore
 import XCTest
 
@@ -299,6 +300,218 @@ final class UserDictionaryTests: XCTestCase {
         } catch {
             XCTAssertEqual(dictionary.errorMessage(for: error), "This term no longer exists.")
         }
+
+        do {
+            _ = try await dictionary.addTerm(text: String(repeating: "a", count: DictionaryTerm.maximumLength + 1), aliases: [])
+            XCTFail("Expected textTooLong error")
+        } catch {
+            XCTAssertEqual(
+                dictionary.errorMessage(for: error),
+                "Term text must be \(DictionaryTerm.maximumLength) characters or fewer."
+            )
+        }
+
+        let longAlias = String(repeating: "b", count: DictionaryTerm.maximumLength + 1)
+        do {
+            _ = try await dictionary.addTerm(text: "Valid", aliases: [longAlias])
+            XCTFail("Expected aliasTooLong error")
+        } catch {
+            XCTAssertTrue(dictionary.errorMessage(for: error).contains("must be \(DictionaryTerm.maximumLength) characters or fewer."))
+        }
+    }
+
+    func testTimeBudgetExceededPastesRawTextAndLogsReason() async throws {
+        let seedStore = try MemoryStore(directory: directory)
+        _ = try seedStore.addTerm(text: "Mac", aliases: ["MEC"])
+        try seedStore.close()
+
+        var logs: [String] = []
+        let repository = SQLiteHistoryRepository(directory: directory)
+        let history = DictationHistory(repository: FailingHistoryRepository(), notifications: FakeNotifications(), defaults: defaults, log: { _ in })
+        let dictionary = UserDictionary(repository: repository, timeBudget: .zero, log: { logs.append($0) })
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
+        await dictionary.start().value
+
+        var pasted: String?
+        let delivered = try await delivery.deliver(
+            rawText: "this MEC is fast",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "test",
+            durationSeconds: 1.0
+        ) { pasted = $0 }
+        XCTAssertTrue(delivered)
+        XCTAssertEqual(pasted, "this MEC is fast")
+        XCTAssertEqual(logs.count, 1)
+        XCTAssertTrue(logs[0].contains("time budget"))
+    }
+
+    func testLockedDatabaseRetriesWithBackoffAfterWriteLockClears() async throws {
+        let seedStore = try MemoryStore(directory: directory)
+        _ = try seedStore.addTerm(text: "Mac", aliases: ["MEC"])
+        try seedStore.close()
+
+        // Hold an exclusive SQLite write lock so MemoryStore.init fails with SQLITE_BUSY after busyTimeout.
+        let lock = try ExclusiveSQLiteLock(path: directory.appending(path: "store.sqlite").path)
+        defer { lock.release() }
+
+        var logs: [String] = []
+        let repository = SQLiteHistoryRepository(directory: directory, busyTimeout: 0.15)
+        let history = DictationHistory(repository: FailingHistoryRepository(), notifications: FakeNotifications(), defaults: defaults, log: { _ in })
+        let dictionary = UserDictionary(
+            repository: repository,
+            retryDelays: [.milliseconds(60), .milliseconds(120)],
+            log: { logs.append($0) }
+        )
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
+
+        // First attempt times out on the held lock without blocking future paste.
+        await dictionary.start().value
+        XCTAssertFalse(dictionary.isLoading)
+        XCTAssertNotNil(dictionary.storeError)
+        XCTAssertTrue(dictionary.storeError?.contains("locked") ?? false)
+        XCTAssertTrue(dictionary.isRetryScheduled)
+        XCTAssertEqual(logs.count, 1)
+
+        var rawPasted: String?
+        let pasteClock = ContinuousClock()
+        let pasteStart = pasteClock.now
+        _ = try await delivery.deliver(
+            rawText: "this MEC is fast",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "test",
+            durationSeconds: 1.0
+        ) { rawPasted = $0 }
+        XCTAssertLessThan(pasteStart.duration(to: pasteClock.now), .milliseconds(100))
+        XCTAssertEqual(rawPasted, "this MEC is fast")
+
+        // Release the exclusive write lock and let backoff retry reload the dictionary.
+        lock.release()
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while dictionary.storeError != nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertNil(dictionary.storeError)
+        XCTAssertFalse(dictionary.isRetrying)
+        XCTAssertFalse(dictionary.isRetryScheduled)
+        XCTAssertEqual(dictionary.terms.map(\.text), ["Mac"])
+
+        var correctedPasted: String?
+        _ = try await delivery.deliver(
+            rawText: "this MEC is fast",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "test",
+            durationSeconds: 1.0
+        ) { correctedPasted = $0 }
+        XCTAssertEqual(correctedPasted, "this Mac is fast")
+    }
+
+    func testNextDictationTriggersRetryImmediatelyWhileBackoffSleeps() async throws {
+        let seedStore = try MemoryStore(directory: directory)
+        _ = try seedStore.addTerm(text: "VoiceApp", aliases: ["voice app"])
+        try seedStore.close()
+
+        let lock = try ExclusiveSQLiteLock(path: directory.appending(path: "store.sqlite").path)
+        defer { lock.release() }
+
+        let repository = SQLiteHistoryRepository(directory: directory, busyTimeout: 0.1)
+        let history = DictationHistory(repository: FailingHistoryRepository(), notifications: FakeNotifications(), defaults: defaults, log: { _ in })
+        // Long initial backoff proves next dictation triggers immediate reload instead of waiting 60s.
+        let dictionary = UserDictionary(
+            repository: repository,
+            retryDelays: [.seconds(60)],
+            log: { _ in }
+        )
+        let delivery = DictationDelivery(history: history, dictionary: dictionary)
+
+        await dictionary.start().value
+        XCTAssertNotNil(dictionary.storeError)
+        XCTAssertTrue(dictionary.isRetryScheduled)
+
+        lock.release()
+
+        // First dictation after unlock pastes raw immediately and kicks off immediate retry.
+        var firstPasted: String?
+        _ = try await delivery.deliver(
+            rawText: "open voice app",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "test",
+            durationSeconds: 1.0
+        ) { firstPasted = $0 }
+        XCTAssertEqual(firstPasted, "open voice app")
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while dictionary.storeError != nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(dictionary.storeError)
+        XCTAssertEqual(dictionary.terms.map(\.text), ["VoiceApp"])
+
+        var secondPasted: String?
+        _ = try await delivery.deliver(
+            rawText: "open voice app",
+            appBundleID: nil,
+            appName: nil,
+            modelID: "test",
+            durationSeconds: 1.0
+        ) { secondPasted = $0 }
+        XCTAssertEqual(secondPasted, "open VoiceApp")
+    }
+}
+
+private final class ExclusiveSQLiteLock: @unchecked Sendable {
+    private let releaseSemaphore = DispatchSemaphore(value: 0)
+    private let doneSemaphore = DispatchSemaphore(value: 0)
+    private let stateLock = NSLock()
+    private var released = false
+
+    init(path: String) throws {
+        let locker = try DatabaseQueue(path: path)
+        let acquiredSemaphore = DispatchSemaphore(value: 0)
+        final class LockedErrorBox: @unchecked Sendable {
+            private let lock = NSLock()
+            var error: Error?
+            func set(_ error: Error) { lock.withLock { self.error = error } }
+            func get() -> Error? { lock.withLock { error } }
+        }
+        let errorBox = LockedErrorBox()
+        DispatchQueue.global().async { [releaseSemaphore, doneSemaphore] in
+            defer {
+                try? locker.close()
+                doneSemaphore.signal()
+            }
+            do {
+                try locker.writeWithoutTransaction { db in
+                    try db.execute(sql: "BEGIN EXCLUSIVE")
+                    acquiredSemaphore.signal()
+                    releaseSemaphore.wait()
+                    try db.execute(sql: "ROLLBACK")
+                }
+            } catch {
+                errorBox.set(error)
+                acquiredSemaphore.signal()
+            }
+        }
+        acquiredSemaphore.wait()
+        if let error = errorBox.get() { throw error }
+    }
+
+    func release() {
+        stateLock.lock()
+        let shouldRelease = !released
+        if shouldRelease { released = true }
+        stateLock.unlock()
+        guard shouldRelease else { return }
+        releaseSemaphore.signal()
+        doneSemaphore.wait()
+    }
+
+    deinit {
+        release()
     }
 }
 
