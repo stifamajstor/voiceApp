@@ -193,22 +193,39 @@ unasked permission from notifications turned off. If denied, the reminder stays 
 to VoiceApp's notification settings. After enabling notifications, use **Refresh notifications**.
 Notification previews may show note text according to macOS settings.
 
+Each reminder alerts exactly once for every time you set it to. Setting a reminder starts it over:
+the notification for the old time is withdrawn, so a banner still in Notification Center never hides
+the new alert. If you set a reminder to a time that has already passed, you get one alert right away.
+
+macOS shows the alert at the due time. Only the nearest 60 reminders are given to macOS. A reminder
+macOS was never given (notifications were off or not yet allowed when you set it, or 60 earlier
+reminders fill the window) gets one catch-up alert from VoiceApp at its due time while VoiceApp runs,
+or the next time VoiceApp launches. If notifications are off at that time, the catch-up waits for the
+next time VoiceApp looks with notifications on: the next reminder's due time, waking from sleep,
+or **Refresh notifications**. Several at once produce one summary.
+A reminder macOS held when its due time passed counts as alerted. If notifications were off at that
+moment, macOS showed nothing and VoiceApp does not repeat it later, because it cannot tell that case
+from one where you saw the alert and cleared it. It stays in Notes as overdue.
+
 The original transcript stays immutable. A local `noteState` side table holds current edited text,
-done state, due date, successful OS handoff for that due date, and an alerted timestamp. Note deletion
-scrubs both the transcript
-and side state, retaining only the record tombstone. Notes share the history store actor and ordered
-write queue, including quit draining. Future notifications are restored on launch using a stable ID
-per note, using calendar-date triggers in the current time zone, with repeated DST hours disambiguated.
-Time-zone changes reschedule future requests. Only the nearest 60 future reminders are scheduled;
-all others remain in Notes. Delivery and changes refill available slots. At launch, a due reminder
-successfully handed to macOS is treated as delivered, even after a click or Clear All. Only never
-scheduled reminders get a catch-up alert; multiple missed reminders produce one count summary.
-The alerted timestamp prevents repeated catch-ups; reminders remain overdue until removed or done.
+done state, due date, and one reminder state: *scheduled*, *handed to macOS*, *missed* or *alerted*,
+for that due time. It changes only when something happens (you set, edit, finish or delete the note,
+macOS accepts a request, a due time passes, macOS shows or you click an alert, a catch-up is posted),
+never because of what Notification Center holds or whether notifications are on at the moment of a
+check. An *alerted* reminder is never given to macOS or alerted again for that due time, whatever the
+clock or the notification settings do afterwards. Note deletion scrubs both the transcript and side
+state, retaining only the record tombstone. Notes share the history store actor and ordered write
+queue, including quit draining. Future notifications are restored on launch using a stable ID per
+note and due time, using calendar-date triggers in the current time zone, with repeated DST hours
+disambiguated. Due times round up to a whole second; one a moment away uses an interval trigger.
+Time-zone and clock changes reschedule future requests. A timer wakes VoiceApp just after the next
+due time, whether or not notifications are on, so slots refill and nothing waits for a click. It is
+set again after a Mac wakes from sleep. Edits touch only the changed notification.
 SQLite and the notification service cannot commit atomically; launch reconciliation repairs pending
-requests after interruption. A crash between notification handoff and its timestamp save can repeat
-an alert. Focus and OS settings
-can suppress visible delivery. The first permission dialog currently holds the ordered store queue
-until answered; dictation paste remains independent of that queue.
+requests after interruption. A crash between notification handoff and saving its state can repeat an
+alert. Setting the clock back within a second after a reminder fired, or while VoiceApp is closed, can
+repeat it. Focus and OS settings can suppress visible delivery. The first permission dialog currently
+holds the ordered store queue until answered; dictation paste remains independent of that queue.
 
 ## Cloud correction
 

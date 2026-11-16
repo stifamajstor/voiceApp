@@ -235,7 +235,7 @@ against these contracts exactly.
 - The Notes window lists notes newest first, searches current edited text (last word prefix),
   paginates, copies, edits, marks done/undone, and confirms deletion.
 - Original `.note` records remain immutable. `noteState` holds current text, done state,
-  and reminder due date/catch-up timestamp; FTS indexes current text. Deletion removes this state and its index,
+  and the reminder (due date and state); FTS indexes current text. Deletion removes this state and its index,
   and scrubs the original record into a tombstone. Editing preserves the original transcript locally.
 - Notes reuse `DictationHistory`, its ordered write tail, `SQLiteHistoryRepository`, and
   `HistoryTermination`. Note saves ignore the dictation-history opt-out. Save success flashes a
@@ -244,28 +244,81 @@ against these contracts exactly.
   VoiceApp notification through UserNotifications. Notes and reminders live only inside VoiceApp;
   no other app receives them. No external-app integration or automatic date detection is included.
 - `NoteReminderScheduler` uses a `NoteNotificationCenter` protocol. Notification IDs derive from
-  note UUIDs; future requests replace rather than accumulate. Authorization is requested only when
+  the note UUID and the due time (`voice-note.<uuid>.<due in ms>`), so a notification in Notification
+  Center proves only that this due time was alerted, never an earlier one the reminder was moved from.
+  Changing the date makes the old ID an orphan, which reconciliation removes. Future requests replace
+  rather than accumulate. Authorization is requested only when
   setting a reminder or explicitly refreshing unasked authorization, never at launch or on time-zone
   changes. The window distinguishes not asked yet from turned off. Denial keeps the due date and
   exposes notification settings.
-- `notes.reminderHandoff` adds `noteState.reminderScheduledFor`. A successful future request records
-  its exact due date; replacing/removing a reminder, marking done, or withdrawing it beyond the cap
-  resets this evidence. A due reminder handed to macOS counts as delivered even if the app was closed
-  and its notification was clicked, closed, or cleared. Present/click handlers persist `reminderNotifiedAt`.
-- Launch reconciliation removes orphan requests, schedules only the nearest 60 future reminders,
-  and acknowledges due handoffs. Only never scheduled overdue reminders receive catch-up alerts;
-  several produce one summary (for example, "3 reminders were due while VoiceApp was closed").
-  Successful catch-up persists each note's alerted timestamp to suppress repeat launches.
+- Every reminder has one explicit state, saved with its note as `noteState.reminderDate` (the due time)
+  and `noteState.reminderPhase` (`notes.reminderState`, appended after `correction.addMetadata`, replaces the two timestamps
+  `reminderNotifiedAt` and `reminderScheduledFor` and backfills the phase from them). `ReminderStateMachine` is a pure
+  function `next(state, event)`; the persisted state is the only source of "was this alerted?".
+  Nothing is inferred at check time from Notification Center contents, from the authorization at that
+  moment, or from comparing clocks to timestamps.
+
+  States: `scheduled(d)` (set, no request with macOS), `handedToMacOS(d)` (a request for `d` was added),
+  `missed(d)` (`d` passed with no request with macOS: one catch-up owed), `alerted(d)` (final for `d`).
+
+  | event \ state       | idle | scheduled(d)  | handedToMacOS(d) | missed(d)     | alerted(d) |
+  |---------------------|------|---------------|------------------|---------------|------------|
+  | set(n)              | sch n| sch n         | sch n            | sch n         | sch n      |
+  | remove, done, delete| idle | idle          | idle             | idle          | idle       |
+  | edit                | idle | same          | same             | same          | same       |
+  | timeReached(t)      | idle | t≥d: missed   | t≥d: alerted     | same          | same       |
+  | requestAdded(x)     | idle | x=d: handed   | same             | same          | same       |
+  | requestWithdrawn(x) | idle | same          | x=d: scheduled   | same          | same       |
+  | delivered(x)        | idle | x=d: alerted  | x=d: alerted     | x=d: alerted  | same       |
+  | catchUpPosted(x)    | idle | same          | same             | x=d: alerted  | same       |
+
+  Events naming a due time apply only to that due time, so a late callback for a time the reminder
+  moved away from changes nothing. `delivered` is the `willPresent`/click callback, matched through the
+  due time in the notification ID. A state leaves `alerted` only through `set` or removal, so a clock
+  set back never schedules an alerted due time again. Every `set` starts over, including a set to the
+  same instant: that is a new alert. The table is covered cell by cell by `ReminderStateMachineTests`.
+- Authorization decides only whether a request can be added or a catch-up posted right now. It never
+  changes a state. A request that was with macOS when its due time passed is `alerted`, even if
+  notifications were off at that moment: macOS showed nothing then, and a later look cannot tell that
+  from "shown and cleared", which is what made earlier rules alert twice or never. The reminder stays
+  overdue in Notes. A reminder that was never with macOS because notifications were off when it was set
+  is `missed` and gets its catch-up when VoiceApp next looks with notifications on.
+- `ReminderPlan` (pure) turns the states into work for the notification center: the nearest 60
+  not-yet-alerted reminders (ordered by due time, then ID) are in the window; a `scheduled` one in the
+  window gets a request, a `handedToMacOS` one only if the request went missing or its note changed;
+  a handed one outside it is withdrawn; `missed` ones are owed a catch-up when authorized; `nextWake`
+  is the earliest due time of a reminder that is not yet alerted. `NoteReminderScheduler` only executes
+  the plan and feeds the results back as events: remove orphans, apply `timeReached`, withdraw, hand
+  over, post catch-ups (one summary for several; "were due while VoiceApp was closed" only for the
+  launch reconcile, "are due" otherwise). Each transition is saved with a compare-and-set on the
+  state it was decided from (`transitionNoteReminder`).
+- Reconciliation reads only notes that carry a reminder and re-submits a request only when it is
+  missing, was never handed off, or its note changed (all of them on a time-zone or clock change, or
+  Refresh notifications). Edits, done, delete and Remove reminder on a note without a reminder never
+  touch the notification center.
+- A single `ReminderTimer` is armed for `nextWake` plus one second after every reconcile, whether or not
+  notifications are on, and cancelled only when nothing is waiting. When it fires, a reconcile applies
+  `timeReached`, tops up the 60-request window and posts owed catch-ups. Delivery callbacks
+  (`willPresent`, click) apply `delivered` and run the same reconcile. `NSWorkspace.didWakeNotification`
+  reconciles too, so a Mac asleep over a due time catches up on wake. A catch-up owed while
+  notifications are off waits for the next reconcile with notifications on (the next due time, wake,
+  Refresh, launch); VoiceApp does not poll the settings.
 - All reminders remain in Notes beyond the scheduling cap. Launch, changes, and delivery refill slots.
   Requests use non-repeating calendar-date triggers built from the due date in the current time zone;
   the second repeated DST hour uses its matching UTC offset to preserve the chosen instant.
-  `NSSystemTimeZoneDidChange` reschedules without asking for authorization.
+  Due times round up to whole seconds (never early); one less than two seconds away uses a
+  time-interval trigger so it cannot miss its second. `NSSystemTimeZoneDidChange` and
+  `NSSystemClockDidChange` reschedule without asking for authorization.
+- Settings shows a duplicate shortcut that an earlier build saved, on both recorders, and never
+  disables either silently. It follows changes through the recorders' public `onChange` callback.
 - Notes show due/overdue state live and support a reminder-only filter. Notification clicks clear
   search/filter state, load the target even outside the first page, and select/reveal it in Notes.
 - Edits replace pending notification text. Remove reminder, done, and delete cancel pending and
   delivered notifications. Marking done also clears the stored reminder; marking undone does not restore it.
 - Store writes precede notification effects. Notification failure leaves the reminder in Notes with
-  retry advice. Launch repairs interrupted scheduling; a crash between notification handoff and its
-  timestamp commit can repeat an alert. OS notification settings and Focus can suppress visible alerts.
+  retry advice. Launch repairs interrupted scheduling; a crash between notification handoff and saving
+  its state can repeat an alert. Setting the clock back within a second after a reminder fired (before
+  the timer noted it), or while VoiceApp is closed, can repeat it. OS notification settings and Focus
+  can suppress visible alerts.
   The first authorization dialog currently holds the ordered store queue until answered; paste does
   not wait for this queue. This is a known tradeoff.

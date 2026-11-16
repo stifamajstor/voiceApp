@@ -142,13 +142,25 @@ struct SettingsView: View {
     }
 }
 
+/// Counts shortcut changes made in any recorder. Uses only the recorder's public `onChange` callback.
+@MainActor
+private final class ShortcutChanges: ObservableObject {
+    static let shared = ShortcutChanges()
+    @Published private(set) var count = 0
+    func recorded() { count += 1 }
+}
+
 /// The recorder persists before calling onChange; restore the last accepted value on conflict.
+/// A duplicate saved by an earlier build is shown too, never silently disabled.
 private struct ValidatedShortcutRecorder: View {
     private static let names: [KeyboardShortcuts.Name] = [.pushToTalk, .toggleToTalk, .notePushToTalk, .noteToggle]
+    private static let titles = ["Push to talk — key combo", "Toggle to talk — key combo", "Note — push to talk", "Note — toggle"]
     let title: String
     let name: KeyboardShortcuts.Name
     @State private var accepted: KeyboardShortcuts.Shortcut?
     @State private var message: String?
+    /// Every recorder reports its change here, so the others re-read the bindings and the conflict text follows.
+    @ObservedObject private var changes = ShortcutChanges.shared
 
     init(_ title: String, name: KeyboardShortcuts.Name) {
         self.title = title
@@ -156,15 +168,25 @@ private struct ValidatedShortcutRecorder: View {
         _accepted = State(initialValue: KeyboardShortcuts.getShortcut(for: name))
     }
 
+    private var existingConflict: String? {
+        guard let index = Self.names.firstIndex(of: name) else { return nil }
+        let others = ShortcutValidation.conflicts(of: index, in: Self.names.map { KeyboardShortcuts.getShortcut(for: $0) })
+            .map { "“\(Self.titles[$0])”" }
+        guard !others.isEmpty else { return nil }
+        return "Also assigned to \(others.joined(separator: " and ")). Only one of them will respond. Record a different combination."
+    }
+
     var body: some View {
+        let _ = changes.count
         KeyboardShortcuts.Recorder(title, name: name) { candidate in
             let result = ShortcutValidation.resolve(candidate: candidate, previous: accepted,
                 others: Self.names.filter { $0 != name }.map { KeyboardShortcuts.getShortcut(for: $0) })
             message = result.message
             accepted = result.value
             if result.message != nil { KeyboardShortcuts.setShortcut(result.value, for: name) }
+            ShortcutChanges.shared.recorded()
         }
-        if let message { Text(message).font(.callout).foregroundStyle(Theme.warning) }
+        if let text = message ?? existingConflict { Text(text).font(.callout).foregroundStyle(Theme.warning) }
     }
 }
 

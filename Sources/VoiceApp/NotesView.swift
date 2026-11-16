@@ -40,7 +40,7 @@ struct NotesView: View {
                 Text(error).foregroundStyle(Theme.warning)
             }
             if history.reminderAuthorization != .authorized || history.notificationError != nil {
-                Button("Refresh notifications") { Task { await history.reconcileReminders(requestAuthorization: true).value } }
+                Button("Refresh notifications") { Task { await history.reconcileReminders(requestAuthorization: true, resubmit: .all).value } }
             }
             ScrollViewReader { proxy in
                 List(selection: $history.focusedNoteID) {

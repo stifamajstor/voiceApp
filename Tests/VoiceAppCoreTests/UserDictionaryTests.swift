@@ -586,7 +586,6 @@ private actor GatedHistoryRepository: HistoryRepository {
     func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
-    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
 
     private var openGate: DictionaryGate?
     var saved: [CompletedDictation] = []
@@ -627,7 +626,6 @@ private struct FailingHistoryRepository: HistoryRepository {
     func editNote(id: UUID, text: String) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteDone(id: UUID, isDone: Bool) async throws { throw CocoaError(.featureUnsupported) }
     func setNoteReminder(id: UUID, date: Date?) async throws { throw CocoaError(.featureUnsupported) }
-    func markNoteReminderNotified(id: UUID, at date: Date) async throws { throw CocoaError(.featureUnsupported) }
 
     func open() async throws { throw DictionaryLoadFailure() }
     func append(_ dictation: CompletedDictation) async throws -> MemoryRecord { throw DictionaryLoadFailure() }

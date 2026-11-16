@@ -197,6 +197,7 @@ final class DictionaryStoreTests: XCTestCase {
             "notes.localReminders",
             "notes.reminderHandoff",
             "correction.addMetadata",
+            "notes.reminderState",
         ])
         store = try MemoryStore(directory: directory)
         try store.delete(id: record.id)

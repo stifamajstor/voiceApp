@@ -1141,6 +1141,10 @@ final class CloudCorrectionTests: XCTestCase {
         try assertMainFixtureMigrates("main-0672c02-store")
     }
 
+    func testStoreMigrationPreservesCloudCorrectionMainFixtureAndMapsReminderStates() throws {
+        try assertMainFixtureMigrates("main-c9319dd-store")
+    }
+
     private func assertMainFixtureMigrates(_ fixtureName: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         // Fixtures were created by the unmodified MemoryStore at the named main commits.
@@ -1150,22 +1154,38 @@ final class CloudCorrectionTests: XCTestCase {
         var store: MemoryStore? = try MemoryStore(directory: directory)
         let legacy = try XCTUnwrap(store?.listRecent(kind: .dictation).first)
         XCTAssertEqual(legacy.rawText, "main migration survivor")
-        XCTAssertNil(legacy.correctionInputText)
-        XCTAssertNil(legacy.correctionProvider)
-        XCTAssertNil(legacy.correctionModel)
-        XCTAssertNil(legacy.correctionStatus)
-        XCTAssertNil(legacy.correctionReason)
+        if fixtureName == "main-c9319dd-store" {
+            // That main already had correction metadata; migrating must keep it.
+            XCTAssertEqual(legacy.correctionInputText, "main migration survivor")
+            XCTAssertEqual(legacy.correctionProvider, "anthropic")
+            XCTAssertEqual(legacy.correctionModel, "claude-haiku-5-5")
+            XCTAssertEqual(legacy.correctionStatus, "unchanged")
+            XCTAssertNil(legacy.correctionReason)
+        } else {
+            XCTAssertNil(legacy.correctionInputText)
+            XCTAssertNil(legacy.correctionProvider)
+            XCTAssertNil(legacy.correctionModel)
+            XCTAssertNil(legacy.correctionStatus)
+            XCTAssertNil(legacy.correctionReason)
+        }
         XCTAssertEqual(try store?.listTerms().map(\.text), ["VoiceApp"])
 
-        if fixtureName == "main-0672c02-store" {
+        if fixtureName == "main-0672c02-store" || fixtureName == "main-c9319dd-store" {
             let note = try XCTUnwrap(store?.notes(query: "edited survivor").first)
             XCTAssertEqual(note.record.rawText, "main note raw")
             XCTAssertEqual(note.record.finalText, "main note final")
             XCTAssertEqual(note.text, "edited survivor note")
             XCTAssertEqual(note.reminderDate, Date(timeIntervalSince1970: 1_900_000_000))
-            XCTAssertEqual(note.reminderScheduledFor, note.reminderDate)
+            XCTAssertEqual(note.reminder, .handedToMacOS(dueAt: Date(timeIntervalSince1970: 1_900_000_000)))
             XCTAssertNil(note.record.correctionStatus)
             XCTAssertEqual(try store?.notes().filter(\.isDone).count, 1)
+            if fixtureName == "main-c9319dd-store" {
+                // Both legacy timestamps map onto the explicit state; the first two reminders were never alerted.
+                let scheduled = try XCTUnwrap(store?.note(id: UUID(uuidString: "A1B2C3D4-0000-4000-8000-000000000001")!))
+                XCTAssertEqual(scheduled.reminder, .scheduled(dueAt: Date(timeIntervalSince1970: 1_900_000_600)))
+                let alerted = try XCTUnwrap(store?.note(id: UUID(uuidString: "A1B2C3D4-0000-4000-8000-000000000002")!))
+                XCTAssertEqual(alerted.reminder, .alerted(dueAt: Date(timeIntervalSince1970: 1_700_000_500)))
+            }
             try store?.close()
             store = try MemoryStore(directory: directory)
             XCTAssertEqual(try store?.note(id: note.id), note)
@@ -1207,6 +1227,7 @@ final class CloudCorrectionTests: XCTestCase {
                 "notes.localReminders",
                 "notes.reminderHandoff",
                 "correction.addMetadata",
+                "notes.reminderState",
             ])
             let row = try XCTUnwrap(Row.fetchOne(db, sql: """
                 SELECT rawText, finalText, correctionInputText, correctionProvider,

@@ -7,4 +7,11 @@ public enum ShortcutValidation {
         }
         return (candidate, nil)
     }
+
+    /// Positions whose binding equals the one at `index`. Recorders only check at the moment of recording, so a
+    /// duplicate saved by an earlier build is found this way when Settings opens.
+    public static func conflicts<Value: Equatable>(of index: Int, in bindings: [Value?]) -> [Int] {
+        guard bindings.indices.contains(index), let mine = bindings[index] else { return [] }
+        return bindings.indices.filter { $0 != index && bindings[$0] == mine }
+    }
 }
