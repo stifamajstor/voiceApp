@@ -9,6 +9,8 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Local dictation history with search, copy, and deletion.
 - Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
 - Voice notes with separate shortcuts, editing, done state, and in-app reminders.
+
+- Optional cloud correction in Settings using your own Anthropic or OpenAI API key (off by default).
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -98,6 +100,8 @@ Use the trash button next to a downloaded model in Settings to remove it. Models
 ## Privacy and permissions
 
 Audio capture and speech inference run on your Mac. VoiceApp does not upload recordings for transcription. Network access is used for dependencies, model files, and tokenizer downloads; prepare the selected model and its first load before relying on offline use.
+
+Cloud post-correction is off by default. When you enable it and add an API key, VoiceApp sends the dictionary-corrected transcript, your dictionary term names, and the target app name over HTTPS to the provider you selected (unless the focused app is excluded). OpenAI requests set `store: false`; Anthropic does not retain prompts or outputs by default or train on API traffic. API keys live in your login Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, non-synchronizable) and are never stored in UserDefaults, the history database, or logs.
 
 | Permission | Purpose |
 |---|---|
@@ -197,6 +201,19 @@ an alert. Focus and OS settings
 can suppress visible delivery. The first permission dialog currently holds the ordered store queue
 until answered; dictation paste remains independent of that queue.
 
+## Cloud correction
+
+Enable **Correct dictations with a cloud model** in **Settings → Correction** to pass each
+dictionary-corrected dictation once through your own **Anthropic** (`claude-haiku-5-5` default,
+Messages API with thinking disabled and low effort) or **OpenAI** (`gpt-6-luna` default,
+Responses API with `reasoning.effort: "none"` and `store: false`) model before pasting.
+
+- **Non-blocking deadline:** Requests use a 2-second wall-clock deadline (`CloudCorrectionConfig.requestDeadline`). If the network is offline, slow, or rate-limited, VoiceApp pastes the dictionary-corrected text on time and discards any late response.
+- **Circuit breaker:** After 3 consecutive request or validation failures, cloud correction pauses for 5 minutes and falls back to dictionary text without network calls.
+- **Structured edit contract:** Models return only targeted `{original, replacement}` edits via JSON schema, never a full rewrite. VoiceApp applies edits deterministically and rejects the whole response if any edit is empty, missing, matches more than once, overlaps another edit, or changes more than 40% of the transcript's words.
+- **Models and testing:** Settings populates the model picker from each provider's `GET /v1/models` endpoint (OpenAI is filtered to a short allowlist of fast `reasoning.effort: "none"` models) and includes a **Test** button that sends a short sample and displays latency or errors in plain words.
+- **App exclusions and history:** Excluded apps (chosen from running apps or entered by bundle ID; empty by default) never send transcripts to the cloud. History records keep the text before and after the model along with provider, model, outcome status, and any fallback or skip reason.
+
 ## Troubleshooting
 
 - **No Dock icon or window:** this is a menu bar app. Click its microphone icon to open Settings or quit.
@@ -246,8 +263,8 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | Path | Responsibility |
 |---|---|
 | `Sources/VoiceApp/App.swift` | App lifecycle and menu bar scene |
-| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, custom dictionary and text correction, search and deletion state |
-| `Tests/VoiceAppCoreTests/` | Store, history, dictionary, and text correction tests |
+| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, custom dictionary and text correction, cloud correction providers and Keychain wrapper, search and deletion state |
+| `Tests/VoiceAppCoreTests/` | Store, history, dictionary, text correction, and cloud correction tests |
 | `ModelCatalog.swift`, `ModelManager.swift`, `ParakeetEngine.swift` | Model catalog, downloads, loading, and transcription |
 | `DictationController.swift`, `AudioRecorder.swift` | Dictation state and microphone capture |
 | `HotkeyManager.swift`, `ModifierHotkey.swift` | Global shortcuts |

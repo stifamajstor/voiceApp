@@ -35,6 +35,9 @@ struct HistoryView: View {
                             HStack {
                                 Text(record.createdAt, format: .dateTime.year().month().day().hour().minute())
                                 if let name = record.appName { Text("· \(name)") }
+                                if let summary = Self.correctionSummary(for: record) {
+                                    Text("· \(summary)")
+                                }
                             }
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
@@ -43,6 +46,15 @@ struct HistoryView: View {
                                 .font(.body)
                                 .foregroundStyle(Theme.textPrimary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            if record.correctionStatus == CorrectionStatus.applied.rawValue,
+                               let before = record.correctionInputText,
+                               before != record.finalText {
+                                Text("Before model: \(before)")
+                                    .lineLimit(2)
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                         Button {
                             TextInserter.copy(record.finalText)
@@ -114,6 +126,29 @@ struct HistoryView: View {
 
     private var deleteCount: Int {
         history.needsDeleteAllConfirmation ? history.deleteAllCount : history.selectedDeleteCount
+    }
+
+    private static func correctionSummary(for record: MemoryRecord) -> String? {
+        guard let status = record.correctionStatus.flatMap(CorrectionStatus.init(rawValue:)) else {
+            return nil
+        }
+        let target = record.correctionModel ?? record.correctionProvider
+        switch status {
+        case .applied:
+            return target.map { "corrected (\($0))" } ?? "corrected"
+        case .unchanged:
+            return target.map { "checked (\($0))" } ?? "checked"
+        case .fallback:
+            if let reason = record.correctionReason, !reason.isEmpty {
+                return "fell back: \(reason)"
+            }
+            return "fell back"
+        case .skipped:
+            if let reason = record.correctionReason, !reason.isEmpty {
+                return "skipped: \(reason)"
+            }
+            return "skipped"
+        }
     }
 }
 

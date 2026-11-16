@@ -11,8 +11,9 @@ Its whole job:
 4. Paste the transcribed text into whatever app is focused.
 5. Save dictations locally by default, with a history window for search, copy, and deletion.
 6. Apply a local custom dictionary (`Settings → Dictionary`) to correct terms and aliases before pasting.
+7. Optionally pass dictionary-corrected transcripts once through the user's Anthropic or OpenAI model (`Settings → Correction`) before pasting, without ever blocking dictation on the network.
 
-Everything runs on-device. No accounts, no cloud.
+Speech recognition runs entirely on-device with no VoiceApp account. Optional cloud post-correction uses only the user's own API key when enabled.
 
 ## Stack
 
@@ -115,6 +116,18 @@ and leaves dictation pasting raw text. **Settings → Dictionary** lists terms, 
 canonical text and comma-separated aliases, deletes with confirmation, searches when 8 or more terms exist,
 and displays store validation errors in plain English. Number formatting, acoustic boosting, and sync remain
 separate.
+
+## Cloud correction
+
+`DictationDelivery` runs `transcription → dictionary pass → cloud correction → paste`. Cloud correction is off by default and runs only when enabled in **Settings → Correction**, an API key is present for the selected provider, and the frontmost app bundle ID is not in the exclusion list (empty by default).
+
+- **Non-blocking deadline & circuit breaker:** `CloudCorrectionService` wraps every dictation request in a single constant wall-clock deadline (`CloudCorrectionConfig.requestDeadline = .seconds(2)`). If the request times out or fails, the dictionary-corrected text is pasted on time and any late response is discarded. Three consecutive request or validation failures open a circuit breaker (`CorrectionCircuitBreaker`) that skips cloud calls for 5 minutes before allowing a half-open probe.
+- **Providers (`CloudCorrectionProvider`):**
+  - `AnthropicCorrectionProvider` (`POST /v1/messages`, `anthropic-version: 2026-10-21`, `Authorization: Bearer <key>`, default `claude-haiku-5-5`, `thinking.type: "disabled"`, `output_config.effort: "low"`, JSON schema output). Models are loaded from `GET /v1/models` filtered to active chat models supporting structured outputs, disabled thinking, and low effort.
+  - `OpenAICorrectionProvider` (`POST /v1/responses`, `Authorization: Bearer <key>`, default `gpt-6-luna`, `reasoning.effort: "none"`, `store: false`, strict JSON schema output). Models are loaded from `GET /v1/models` filtered to `CloudCorrectionConfig.openAIAllowlistedModelIDs` (`gpt-6-luna`, `gpt-6.1-terra`, `gpt-6-sol`) with unexpired `shutdown_date`.
+- **Edit contract (`CorrectionEditValidator`):** Prompts include the dictionary terms and target app name. Providers return only `{"edits": [{"original": ..., "replacement": ...}]}`. VoiceApp applies edits deterministically and rejects the whole response if any `original` is empty, missing, matches more than once, edits overlap, or edits change more than `40%` of words (`max(1, Int(Double(totalWords) * 0.40))`) or grow output disproportionately.
+- **Keychain & privacy:** `KeychainSecretStore` stores each provider's key in the login Keychain as a generic password (`kSecClassGenericPassword`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, `kSecAttrSynchronizable: false`), never in UserDefaults, SQLite, or logs (`SecretRedaction`). **Settings → Correction** displays `"Transcripts are sent to <provider> when correction is on..."` alongside provider/key/model controls, a **Test** button reporting latency or errors, and the excluded apps list.
+- **Store (`correction.addMetadata`):** Adds five nullable columns to `records`: `correctionInputText`, `correctionProvider`, `correctionModel`, `correctionStatus` (`applied` / `unchanged` / `fallback` / `skipped`), and `correctionReason`. `MemoryStore.delete(ids:)` clears all five columns to `NULL` on tombstoning.
 
 ## Model catalog (verified against `argmaxinc/whisperkit-coreml` on 2026-09-30)
 

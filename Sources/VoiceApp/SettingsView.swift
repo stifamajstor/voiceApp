@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import KeyboardShortcuts
 import SwiftUI
@@ -104,6 +105,8 @@ struct SettingsView: View {
             .toggleStyle(.switch)
 
             DictionarySection()
+
+            CorrectionSection()
 
             Section {
                 Toggle("Check for updates automatically", isOn: Binding(
@@ -605,5 +608,318 @@ private struct PermissionRow<Actions: View>: View {
                     .buttonStyle(NeonButtonStyle())
             }
         }
+    }
+}
+
+// MARK: - Cloud correction
+
+private struct CorrectionSection: View {
+    private struct RunningAppOption: Identifiable {
+        let bundleID: String
+        let name: String
+        var id: String { bundleID }
+    }
+
+    @EnvironmentObject private var correction: CloudCorrectionService
+    @State private var apiKeyInput = ""
+    @State private var excludedBundleInput = ""
+    @State private var runningApps: [RunningAppOption] = []
+
+    private var hasSavedKey: Bool {
+        correction.hasKey(for: correction.selectedProvider)
+    }
+
+    private var trimmedAPIKeyInput: String {
+        apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedExcludedBundleInput: String {
+        excludedBundleInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        Section {
+            Toggle("Correct dictations with a cloud model", isOn: $correction.isEnabled)
+                .toggleStyle(.switch)
+
+            if correction.isEnabled && !hasSavedKey {
+                Label(
+                    "Add an \(correction.selectedProvider.displayName) API key below before cloud correction runs.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(Theme.warning)
+                .font(.callout)
+            }
+
+            if correction.isCircuitOpen {
+                Label(
+                    "Paused for 5 minutes after 3 consecutive failures. Dictation uses dictionary text until then.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .foregroundStyle(Theme.warning)
+                .font(.callout)
+            }
+
+            Picker("Provider", selection: $correction.selectedProvider) {
+                ForEach(CloudProviderID.allCases) { provider in
+                    Text(provider.displayName).tag(provider)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("\(correction.selectedProvider.displayName) API key")
+                    Spacer()
+                    Text(hasSavedKey ? "Saved in Keychain" : "Not set")
+                        .font(.caption)
+                        .foregroundStyle(hasSavedKey ? Theme.neon : Theme.textSecondary)
+                }
+                HStack(spacing: 8) {
+                    SecureField(
+                        hasSavedKey ? "Enter new key to replace" : "Paste API key",
+                        text: $apiKeyInput
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveKeyAndRefresh() }
+
+                    Button("Save") {
+                        saveKeyAndRefresh()
+                    }
+                    .buttonStyle(NeonButtonStyle(prominent: true))
+                    .disabled(trimmedAPIKeyInput.isEmpty)
+
+                    if hasSavedKey {
+                        Button("Remove", role: .destructive) {
+                            try? correction.removeAPIKey()
+                            apiKeyInput = ""
+                        }
+                        .buttonStyle(NeonButtonStyle())
+                    }
+                }
+            }
+
+            if let keyError = correction.keyStoreError {
+                Label(keyError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(Theme.warning)
+                    .font(.callout)
+            }
+
+            HStack(spacing: 8) {
+                Picker("Model", selection: Binding(
+                    get: { correction.currentModelID },
+                    set: { correction.setSelectedModelID($0) }
+                )) {
+                    ForEach(correction.currentModels) { model in
+                        Text(modelLabel(for: model)).tag(model.id)
+                    }
+                }
+
+                if correction.isRefreshingModels {
+                    ProgressView().controlSize(.small).tint(Theme.neon)
+                } else {
+                    Button("Refresh") {
+                        Task { await correction.refreshModels() }
+                    }
+                    .buttonStyle(NeonButtonStyle())
+                    .disabled(!hasSavedKey)
+                }
+
+                Button("Test") {
+                    runTest()
+                }
+                .buttonStyle(NeonButtonStyle())
+                .disabled((!hasSavedKey && trimmedAPIKeyInput.isEmpty) || correction.testState == .testing)
+            }
+
+            if let modelsError = correction.modelsError {
+                Label(modelsError, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(Theme.warning)
+                    .font(.callout)
+            }
+
+            testStatusView
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Excluded apps")
+                        Text("Transcripts are never sent when focused in these apps.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer()
+                    Menu("Add Running App…") {
+                        if runningApps.isEmpty {
+                            Text("No other running apps")
+                        } else {
+                            ForEach(runningApps) { app in
+                                Button("\(app.name) (\(app.bundleID))") {
+                                    correction.addExcludedBundleID(app.bundleID)
+                                }
+                            }
+                        }
+                    }
+                    .onAppear { refreshRunningApps() }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("Bundle ID (e.g. com.apple.Terminal)", text: $excludedBundleInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { addExcludedInput() }
+
+                    Button("Add") {
+                        addExcludedInput()
+                    }
+                    .buttonStyle(NeonButtonStyle())
+                    .disabled(trimmedExcludedBundleInput.isEmpty)
+                }
+
+                if correction.excludedBundleIDs.isEmpty {
+                    Text("No excluded apps.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    ForEach(correction.excludedBundleIDs, id: \.self) { bundleID in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                if let appName = appName(for: bundleID) {
+                                    Text(appName)
+                                        .font(.callout.weight(.medium))
+                                    Text(bundleID)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.textSecondary)
+                                } else {
+                                    Text(bundleID)
+                                        .font(.callout)
+                                }
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                correction.removeExcludedBundleID(bundleID)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(Theme.danger)
+                            .help("Remove excluded app")
+                            .accessibilityLabel("Remove \(bundleID)")
+                        }
+                    }
+                }
+            }
+        } header: {
+            SectionTitle("Correction")
+        } footer: {
+            Text(correction.selectedProvider.privacyNotice)
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .task {
+            refreshRunningApps()
+            if hasSavedKey {
+                await correction.refreshModels()
+            }
+        }
+        .onChange(of: correction.selectedProvider) { _, newProvider in
+            apiKeyInput = ""
+            if correction.hasKey(for: newProvider) {
+                Task { await correction.refreshModels(for: newProvider) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var testStatusView: some View {
+        switch correction.testState {
+        case .idle:
+            EmptyView()
+        case .testing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small).tint(Theme.neon)
+                Text("Sending test request…")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        case .succeeded(let ms, let modelID):
+            Label(
+                ms > 2000
+                    ? "Connected (\(modelID)) in \(ms) ms — slower than the 2.0 s dictation limit"
+                    : "Connected (\(modelID)) in \(ms) ms",
+                systemImage: "checkmark.circle.fill"
+            )
+            .foregroundStyle(ms > 2000 ? Theme.warning : Theme.neon)
+            .font(.callout)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(Theme.warning)
+                .font(.callout)
+        }
+    }
+
+    private func modelLabel(for model: CloudModelOption) -> String {
+        model.displayName == model.id ? model.id : "\(model.displayName) (\(model.id))"
+    }
+
+    private func saveKeyAndRefresh() {
+        let key = trimmedAPIKeyInput
+        guard !key.isEmpty else { return }
+        do {
+            try correction.saveAPIKey(key)
+            apiKeyInput = ""
+            Task { await correction.refreshModels() }
+        } catch {
+            // keyStoreError is already published on correction.
+        }
+    }
+
+    private func runTest() {
+        if !trimmedAPIKeyInput.isEmpty {
+            do {
+                try correction.saveAPIKey(trimmedAPIKeyInput)
+                apiKeyInput = ""
+            } catch {
+                return
+            }
+        }
+        Task {
+            await correction.testConnection()
+            if correction.hasKey(for: correction.selectedProvider) {
+                await correction.refreshModels()
+            }
+        }
+    }
+
+    private func addExcludedInput() {
+        guard !trimmedExcludedBundleInput.isEmpty else { return }
+        correction.addExcludedBundleID(trimmedExcludedBundleInput)
+        excludedBundleInput = ""
+    }
+
+    private func refreshRunningApps() {
+        let ownBundleID = Bundle.main.bundleIdentifier
+        var seen: Set<String> = []
+        runningApps = NSWorkspace.shared.runningApplications.compactMap { app in
+            guard let bundleID = app.bundleIdentifier,
+                  bundleID != ownBundleID,
+                  app.activationPolicy != .prohibited,
+                  seen.insert(bundleID.lowercased()).inserted else {
+                return nil
+            }
+            return RunningAppOption(bundleID: bundleID, name: app.localizedName ?? bundleID)
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func appName(for bundleID: String) -> String? {
+        if let running = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier?.caseInsensitiveCompare(bundleID) == .orderedSame
+        }), let name = running.localizedName {
+            return name
+        }
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            return FileManager.default.displayName(atPath: url.path)
+                .replacingOccurrences(of: ".app", with: "")
+        }
+        return nil
     }
 }

@@ -9,9 +9,27 @@ public struct CompletedDictation: Sendable {
     public let appName: String?
     public let modelID: String
     public let durationSeconds: Double
+    public let correctionInputText: String?
+    public let correctionProvider: String?
+    public let correctionModel: String?
+    public let correctionStatus: String?
+    public let correctionReason: String?
 
-    public init(id: UUID = UUID(), createdAt: Date = .now, rawText: String, finalText: String,
-                appBundleID: String?, appName: String?, modelID: String, durationSeconds: Double) {
+    public init(
+        id: UUID = UUID(),
+        createdAt: Date = .now,
+        rawText: String,
+        finalText: String,
+        appBundleID: String?,
+        appName: String?,
+        modelID: String,
+        durationSeconds: Double,
+        correctionInputText: String? = nil,
+        correctionProvider: String? = nil,
+        correctionModel: String? = nil,
+        correctionStatus: String? = nil,
+        correctionReason: String? = nil
+    ) {
         self.id = id
         self.createdAt = createdAt
         self.rawText = rawText
@@ -20,6 +38,11 @@ public struct CompletedDictation: Sendable {
         self.appName = appName
         self.modelID = modelID
         self.durationSeconds = durationSeconds
+        self.correctionInputText = correctionInputText
+        self.correctionProvider = correctionProvider
+        self.correctionModel = correctionModel
+        self.correctionStatus = correctionStatus
+        self.correctionReason = correctionReason
     }
 }
 
@@ -74,10 +97,22 @@ public actor SQLiteHistoryRepository: HistoryRepository, DictionaryRepository {
     }
 
     public func append(_ dictation: CompletedDictation) throws -> MemoryRecord {
-        return try availableStore().append(id: dictation.id, kind: .dictation, createdAt: dictation.createdAt,
-            rawText: dictation.rawText, finalText: dictation.finalText,
-            appBundleID: dictation.appBundleID, appName: dictation.appName,
-            modelID: dictation.modelID, durationSeconds: dictation.durationSeconds)
+        return try availableStore().append(
+            id: dictation.id,
+            kind: .dictation,
+            createdAt: dictation.createdAt,
+            rawText: dictation.rawText,
+            finalText: dictation.finalText,
+            appBundleID: dictation.appBundleID,
+            appName: dictation.appName,
+            modelID: dictation.modelID,
+            durationSeconds: dictation.durationSeconds,
+            correctionInputText: dictation.correctionInputText,
+            correctionProvider: dictation.correctionProvider,
+            correctionModel: dictation.correctionModel,
+            correctionStatus: dictation.correctionStatus,
+            correctionReason: dictation.correctionReason
+        )
     }
 
     public func records(query: String, limit: Int) throws -> [MemoryRecord] {

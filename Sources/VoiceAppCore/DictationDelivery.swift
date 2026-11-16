@@ -4,10 +4,16 @@ import Foundation
 public final class DictationDelivery {
     private let history: DictationHistory
     private let dictionary: UserDictionary
+    private let cloudCorrection: (any CloudCorrecting)?
 
-    public init(history: DictationHistory, dictionary: UserDictionary) {
+    public init(
+        history: DictationHistory,
+        dictionary: UserDictionary,
+        cloudCorrection: (any CloudCorrecting)? = nil
+    ) {
         self.history = history
         self.dictionary = dictionary
+        self.cloudCorrection = cloudCorrection
     }
 
     public func deliver(
@@ -24,14 +30,31 @@ public final class DictationDelivery {
             return false
         }
 
-        let correctedText = dictionary.correct(text).text
+        let dictionaryText = dictionary.correct(text).text
+        let outcome: CorrectionOutcome
+        if let cloudCorrection {
+            outcome = await cloudCorrection.correct(
+                dictionaryText,
+                dictionaryTerms: dictionary.terms.map(\.text),
+                appBundleID: appBundleID,
+                appName: appName
+            )
+        } else {
+            outcome = CorrectionOutcome(outputText: dictionaryText)
+        }
+
         let completed = CompletedDictation(
             rawText: rawText,
-            finalText: correctedText,
+            finalText: outcome.outputText,
             appBundleID: appBundleID,
             appName: appName,
             modelID: modelID,
-            durationSeconds: durationSeconds
+            durationSeconds: durationSeconds,
+            correctionInputText: outcome.inputText,
+            correctionProvider: outcome.provider?.rawValue,
+            correctionModel: outcome.modelID,
+            correctionStatus: outcome.status?.rawValue,
+            correctionReason: outcome.reason
         )
         try await history.deliver(completed, destination: destination, paste: paste)
         return true

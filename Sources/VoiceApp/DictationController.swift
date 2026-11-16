@@ -41,9 +41,18 @@ final class DictationController: ObservableObject {
     var isQuitting = false
     private var promptedAccessibilityThisLaunch = false
 
-    init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary) {
+    init(
+        modelManager: ModelManager,
+        history: DictationHistory,
+        dictionary: UserDictionary,
+        cloudCorrection: CloudCorrectionService
+    ) {
         self.modelManager = modelManager
-        self.delivery = DictationDelivery(history: history, dictionary: dictionary)
+        self.delivery = DictationDelivery(
+            history: history,
+            dictionary: dictionary,
+            cloudCorrection: cloudCorrection
+        )
         recorder.onInterrupted = { [weak self] in
             // Input device vanished mid-recording: transcribe what we have.
             self?.finishRecording()
