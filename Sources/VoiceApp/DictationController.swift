@@ -27,7 +27,7 @@ final class DictationController: ObservableObject {
     private enum Trigger { case pushToTalk, toggle }
 
     private let modelManager: ModelManager
-    private let history: DictationHistory
+    private let delivery: DictationDelivery
     private let recorder = AudioRecorder()
     private let hotkeys = HotkeyManager()
     private let modifierHotkeys = ModifierHotkeyMonitor()
@@ -40,9 +40,9 @@ final class DictationController: ObservableObject {
     private var transcriptionTask: Task<Void, Never>?
     private var promptedAccessibilityThisLaunch = false
 
-    init(modelManager: ModelManager, history: DictationHistory) {
+    init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary) {
         self.modelManager = modelManager
-        self.history = history
+        self.delivery = DictationDelivery(history: history, dictionary: dictionary)
         recorder.onInterrupted = { [weak self] in
             // Input device vanished mid-recording: transcribe what we have.
             self?.finishRecording()
@@ -191,22 +191,23 @@ final class DictationController: ObservableObject {
             return
         }
 
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !Self.isNonSpeechMarker(text) else {
-            showError("No speech detected")
-            return
-        }
-
         let target = NSWorkspace.shared.frontmostApplication
-        let completed = CompletedDictation(rawText: rawText, finalText: text,
-            appBundleID: target?.bundleIdentifier, appName: target?.localizedName,
-            modelID: modelID, durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate)
+        let keepOnClipboard = UserDefaults.standard.bool(forKey: TextInserter.keepOnClipboardKey)
         do {
-            let keepOnClipboard = UserDefaults.standard.bool(forKey: TextInserter.keepOnClipboardKey)
-            try await history.deliver(completed) { text in
+            let delivered = try await delivery.deliver(
+                rawText: rawText,
+                appBundleID: target?.bundleIdentifier,
+                appName: target?.localizedName,
+                modelID: modelID,
+                durationSeconds: Double(samples.count) / AudioRecorder.targetSampleRate
+            ) { text in
                 try await TextInserter.insert(text, keepOnClipboard: keepOnClipboard)
             }
-            state = .idle
+            if delivered {
+                state = .idle
+            } else {
+                showError("No speech detected")
+            }
         } catch {
             if case TextInserter.InsertError.accessibilityNotGranted = error,
                !promptedAccessibilityThisLaunch {
@@ -215,12 +216,6 @@ final class DictationController: ObservableObject {
             }
             showError(error.localizedDescription)
         }
-    }
-
-    /// Whisper emits things like "[BLANK_AUDIO]" or "(silence)" for empty input.
-    private static func isNonSpeechMarker(_ text: String) -> Bool {
-        guard let first = text.first, let last = text.last else { return true }
-        return (first == "[" && last == "]") || (first == "(" && last == ")")
     }
 
     // MARK: Helpers

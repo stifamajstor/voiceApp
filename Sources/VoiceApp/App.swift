@@ -8,19 +8,24 @@ struct VoiceApp: App {
     @StateObject private var modelManager: ModelManager
     @StateObject private var dictation: DictationController
     @StateObject private var history: DictationHistory
+    @StateObject private var dictionary: UserDictionary
     @StateObject private var historyWindow: HistoryWindowController
     @StateObject private var termination: HistoryTermination
     @StateObject private var updater = Updater()
 
     init() {
         ModifierKey.registerDefaults()
+        let repository = SQLiteHistoryRepository()
         let modelManager = ModelManager()
-        let history = DictationHistory()
-        let dictation = DictationController(modelManager: modelManager, history: history)
+        let history = DictationHistory(repository: repository)
+        let dictionary = UserDictionary(repository: repository)
+        let dictation = DictationController(modelManager: modelManager, history: history, dictionary: dictionary)
         _history = StateObject(wrappedValue: history)
+        _dictionary = StateObject(wrappedValue: dictionary)
         let historyWindow = HistoryWindowController(history: history)
         _historyWindow = StateObject(wrappedValue: historyWindow)
         history.start()
+        dictionary.start()
         _modelManager = StateObject(wrappedValue: modelManager)
         _dictation = StateObject(wrappedValue: dictation)
         let termination = HistoryTermination(history: history, showHistory: historyWindow.show)
@@ -46,6 +51,7 @@ struct VoiceApp: App {
         Settings {
             SettingsView()
                 .environmentObject(history)
+                .environmentObject(dictionary)
                 .environmentObject(modelManager)
                 .environmentObject(updater)
         }

@@ -7,6 +7,7 @@ On-device dictation for macOS. Hold a shortcut, speak, and release to paste the 
 - Multilingual transcription with automatic language detection or a Whisper language hint.
 - Clipboard restoration after automatic paste, with a manual-paste fallback.
 - Local dictation history with search, copy, and deletion.
+- Custom dictionary in Settings to replace spoken aliases and mishearings before pasting.
 - No VoiceApp account or cloud transcription service.
 
 ## Requirements
@@ -137,6 +138,23 @@ not saving; a successful save restores the saved disclosure.
 If the store cannot open or a save fails, Settings → Behavior shows recovery advice,
 and dictation and paste continue. Recent transcripts remain available in memory for this launch.
 
+## Custom dictionary
+
+Add terms and optional comma-separated aliases in **Settings → Dictionary** (for example,
+`Mac` with aliases `MEC, Meg`). Before pasting, VoiceApp replaces matching whole words
+case-insensitively using an in-memory matcher rebuilt only when the dictionary changes, so
+correction adds no store I/O to dictation or paste.
+
+Leading and trailing whitespace is trimmed from term text and aliases, and blank aliases are
+dropped. Duplicate terms or conflicting aliases are rejected with plain-English messages.
+Deleting a term asks for confirmation. When the dictionary has 8 or more terms, a search
+field filters by term or alias.
+
+Terms are stored locally in the same `~/Library/Application Support/VoiceApp/store/store.sqlite`
+database as dictation history. History records keep both the raw transcript and the corrected text,
+and history search matches both. If the dictionary cannot be loaded, VoiceApp logs the cause,
+shows a warning in **Settings → Dictionary**, and pastes the raw transcript.
+
 ## Troubleshooting
 
 - **No Dock icon or window:** this is a menu bar app. Click its microphone icon to open Settings or quit.
@@ -186,8 +204,8 @@ Use the packaged `.app` for permission and dictation checks. `swift run` does no
 | Path | Responsibility |
 |---|---|
 | `Sources/VoiceApp/App.swift` | App lifecycle and menu bar scene |
-| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, search and deletion state |
-| `Tests/VoiceAppCoreTests/` | Store and history persistence, delivery isolation, search, deletion, and concurrency tests |
+| `Sources/VoiceAppCore/` | SQLite store, background history repository, dictation delivery, custom dictionary and text correction, search and deletion state |
+| `Tests/VoiceAppCoreTests/` | Store, history, dictionary, and text correction tests |
 | `ModelCatalog.swift`, `ModelManager.swift`, `ParakeetEngine.swift` | Model catalog, downloads, loading, and transcription |
 | `DictationController.swift`, `AudioRecorder.swift` | Dictation state and microphone capture |
 | `HotkeyManager.swift`, `ModifierHotkey.swift` | Global shortcuts |

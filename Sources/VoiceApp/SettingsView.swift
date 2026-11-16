@@ -98,6 +98,8 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
 
+            DictionarySection()
+
             Section {
                 Toggle("Check for updates automatically", isOn: Binding(
                     get: { updater.automaticallyChecksForUpdates },
@@ -129,6 +131,278 @@ struct SettingsView: View {
         .tint(Theme.neon)
         .preferredColorScheme(.dark)
         .frame(width: 540, height: 640)
+    }
+}
+
+// MARK: - Dictionary
+
+private struct DictionarySection: View {
+    private enum EditorMode: Identifiable {
+        case add
+        case edit(DictionaryTerm)
+
+        var id: String {
+            switch self {
+            case .add: return "add"
+            case .edit(let term): return term.id.uuidString
+            }
+        }
+    }
+
+    @EnvironmentObject private var dictionary: UserDictionary
+    @State private var searchQuery = ""
+    @State private var editorMode: EditorMode?
+    @State private var termPendingDeletion: DictionaryTerm?
+    @State private var isDeleteConfirmationPresented = false
+    @State private var deleteError: String?
+
+    private static let searchThreshold = 8
+
+    private var trimmedQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var filteredTerms: [DictionaryTerm] {
+        guard !trimmedQuery.isEmpty else { return dictionary.terms }
+        return dictionary.terms.filter { term in
+            term.text.localizedStandardContains(trimmedQuery) ||
+            term.aliases.contains { $0.localizedStandardContains(trimmedQuery) }
+        }
+    }
+
+    private var summaryText: String {
+        if dictionary.isLoading { return "Loading dictionary…" }
+        if dictionary.terms.isEmpty { return "No terms yet" }
+        if !trimmedQuery.isEmpty {
+            return "\(filteredTerms.count) of \(dictionary.terms.count) terms"
+        }
+        let count = dictionary.terms.count
+        return "\(count) \(count == 1 ? "term" : "terms")"
+    }
+
+    var body: some View {
+        Section {
+            HStack {
+                Text(summaryText)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button("Add Term…") {
+                    deleteError = nil
+                    editorMode = .add
+                }
+                .buttonStyle(NeonButtonStyle(prominent: true))
+                .disabled(dictionary.isLoading || dictionary.storeError != nil)
+            }
+
+            if let error = dictionary.storeError ?? deleteError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(Theme.warning)
+                    .font(.callout)
+            }
+
+            if dictionary.terms.count >= Self.searchThreshold || !searchQuery.isEmpty {
+                TextField("Search terms or aliases", text: $searchQuery)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if !dictionary.isLoading && dictionary.storeError == nil && dictionary.terms.isEmpty {
+                Text("Add spellings and spoken aliases (for example, \"Mac\" with aliases \"MEC, Meg\"). VoiceApp replaces aliases before pasting.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            } else if filteredTerms.isEmpty && !dictionary.terms.isEmpty {
+                Text("No matching terms.")
+                    .font(.callout)
+                    .foregroundStyle(Theme.textSecondary)
+            } else if filteredTerms.count <= 6 {
+                ForEach(filteredTerms) { term in
+                    termRow(term)
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(filteredTerms.enumerated()), id: \.element.id) { index, term in
+                            if index > 0 { Divider() }
+                            termRow(term)
+                        }
+                    }
+                }
+                .frame(height: 220)
+            }
+        } header: {
+            SectionTitle("Dictionary")
+        } footer: {
+            Text("Terms and aliases match whole words case-insensitively before pasting and are stored locally.")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .sheet(item: $editorMode) { mode in
+            TermEditorSheet(mode: mode)
+                .environmentObject(dictionary)
+        }
+        .alert(
+            "Delete \"\(termPendingDeletion?.text ?? "")\"?",
+            isPresented: $isDeleteConfirmationPresented,
+            presenting: termPendingDeletion
+        ) { term in
+            Button("Cancel", role: .cancel) {
+                termPendingDeletion = nil
+            }
+            Button("Delete", role: .destructive) {
+                termPendingDeletion = nil
+                Task {
+                    do {
+                        try await dictionary.deleteTerm(id: term.id)
+                    } catch {
+                        deleteError = dictionary.errorMessage(for: error)
+                    }
+                }
+            }
+        } message: { term in
+            if term.aliases.isEmpty {
+                Text("This removes \"\(term.text)\" from your dictionary.")
+            } else {
+                Text("This removes \"\(term.text)\" and its aliases (\(term.aliases.joined(separator: ", "))) from your dictionary.")
+            }
+        }
+    }
+
+    private func termRow(_ term: DictionaryTerm) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(term.text)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                if !term.aliases.isEmpty {
+                    Text(term.aliases.joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+            Spacer(minLength: 0)
+            Button("Edit") {
+                deleteError = nil
+                editorMode = .edit(term)
+            }
+            .buttonStyle(NeonButtonStyle())
+            .accessibilityLabel("Edit \(term.text)")
+            Button(role: .destructive) {
+                deleteError = nil
+                termPendingDeletion = term
+                isDeleteConfirmationPresented = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(Theme.danger)
+            .help("Delete term")
+            .accessibilityLabel("Delete \(term.text)")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private struct TermEditorSheet: View {
+        let mode: EditorMode
+        @EnvironmentObject private var dictionary: UserDictionary
+        @Environment(\.dismiss) private var dismiss
+
+        @State private var text: String
+        @State private var aliasesText: String
+        @State private var errorMessage: String?
+        @State private var isSaving = false
+
+        init(mode: EditorMode) {
+            self.mode = mode
+            switch mode {
+            case .add:
+                _text = State(initialValue: "")
+                _aliasesText = State(initialValue: "")
+            case .edit(let term):
+                _text = State(initialValue: term.text)
+                _aliasesText = State(initialValue: term.aliases.joined(separator: ", "))
+            }
+        }
+
+        private var title: String {
+            switch mode {
+            case .add: return "Add Term"
+            case .edit: return "Edit Term"
+            }
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(title)
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Term")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    TextField("e.g. Mac", text: $text)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Aliases (comma-separated)")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    TextField("e.g. MEC, Meg", text: $aliasesText)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Aliases are optional. Separate multiple aliases with commas; blank entries are ignored.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                if let errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.warning)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack {
+                    Spacer()
+                    Button("Cancel") { dismiss() }
+                        .buttonStyle(NeonButtonStyle())
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(isSaving)
+                    Button("Save") { save() }
+                        .buttonStyle(NeonButtonStyle(prominent: true))
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(isSaving)
+                }
+            }
+            .padding(20)
+            .frame(width: 400)
+            .background(Theme.background)
+            .foregroundStyle(Theme.textPrimary)
+            .tint(Theme.neon)
+            .preferredColorScheme(.dark)
+            .onChange(of: text) { _, _ in errorMessage = nil }
+            .onChange(of: aliasesText) { _, _ in errorMessage = nil }
+        }
+
+        private func save() {
+            guard !isSaving else { return }
+            isSaving = true
+            errorMessage = nil
+            let aliases = UserDictionary.parseAliases(aliasesText)
+            Task {
+                defer { isSaving = false }
+                do {
+                    switch mode {
+                    case .add:
+                        _ = try await dictionary.addTerm(text: text, aliases: aliases)
+                    case .edit(let term):
+                        _ = try await dictionary.updateTerm(id: term.id, text: text, aliases: aliases)
+                    }
+                    dismiss()
+                } catch {
+                    errorMessage = dictionary.errorMessage(for: error)
+                }
+            }
+        }
     }
 }
 

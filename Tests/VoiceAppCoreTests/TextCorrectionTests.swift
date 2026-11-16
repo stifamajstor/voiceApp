@@ -180,4 +180,47 @@ final class TextCorrectionTests: XCTestCase {
         let long = String(repeating: "A realistic sentence stays exactly as dictated. 👋🏽\n", count: 10_000)
         XCTAssertEqual(Array(correctText(long, terms: terms).text.utf8), Array(long.utf8))
     }
+
+    func testMatcherStripsEdgeWhitespaceAndPinsMutationBehavior() {
+        // Untrimmed matcher input does not eat surrounding whitespace or paragraph breaks.
+        let untrimmed = term(" Mac ", [" x ", "  \t "])
+        XCTAssertEqual(correctText("say x\n\n- item", terms: [untrimmed]).text, "say Mac\n\n- item")
+
+        // Same-length tie prefers the earlier start position.
+        XCTAssertEqual(correctText("a b c", terms: [term("X", ["a b"]), term("Y", ["b c"])]).text, "X c")
+
+        // Reaching a fixed point on exactly the eighth pass reports converged == true.
+        let eightStepChain = (2...9).map { step in
+            term("m\(step)", ["\(step == 2 ? "k1" : "m\(step - 1)") k\(step)"])
+        }
+        let eightStepResult = correctText((1...9).map { "k\($0)" }.joined(separator: " "), terms: eightStepChain)
+        XCTAssertEqual(eightStepResult.text, "m9")
+        XCTAssertTrue(eightStepResult.converged)
+
+        // Expanded case-folded characters (ß -> ss) never match partially at start or end.
+        XCTAssertEqual(correctText("ß", terms: [term("X", ["s"])]).text, "ß")
+        XCTAssertEqual(correctText("aß", terms: [term("X", ["as"])]).text, "aß")
+        XCTAssertEqual(correctText("ßa", terms: [term("X", ["sa"])]).text, "ßa")
+
+        // Equal-length/position ties break by UUID before canonical text spelling.
+        let lowID = term("Zebra", ["same"], id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!)
+        let highID = term("Alpha", ["same"], id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!)
+        XCTAssertEqual(correctText("same", terms: [highID, lowID]).text, "Zebra")
+
+        // Merged chains retain the last applied term ID even when an earlier prefix survives.
+        let firstTerm = term("left middle right", ["a"])
+        let secondTerm = term("X", ["middle right tail extra"])
+        let merged = correctText("a tail extra", terms: [firstTerm, secondTerm])
+        XCTAssertEqual(merged.text, "left X")
+        XCTAssertEqual(merged.replacements.first?.termID, secondTerm.id)
+
+        // Combining marks count as word characters at both boundaries.
+        XCTAssertEqual(correctText("e\u{301}", terms: [term("X", ["e"])]).text, "e\u{301}")
+        XCTAssertEqual(correctText("a\u{301}b", terms: [term("X", ["b"])]).text, "a\u{301}b")
+        XCTAssertEqual(correctText("a\u{0903}", terms: [term("X", ["a"])]).text, "a\u{0903}")
+        XCTAssertEqual(correctText("a\u{20dd}", terms: [term("X", ["a"])]).text, "a\u{20dd}")
+
+        // Decomposed aliases are normalized to composed form when building the matcher.
+        XCTAssertEqual(correctText("caf\u{00e9}", terms: [term("Coffee", ["cafe\u{301}"])]).text, "Coffee")
+    }
 }

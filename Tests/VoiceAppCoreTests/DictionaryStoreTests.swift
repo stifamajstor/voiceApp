@@ -147,6 +147,41 @@ final class DictionaryStoreTests: XCTestCase {
         XCTAssertNotNil(try store.tombstone(id: record.id))
     }
 
+    func testAddAndUpdateTrimWhitespaceAndDropBlankAliases() throws {
+        let added = try store.addTerm(text: "  Mac\t\n", aliases: [" MEC ", "", " \n\t ", "\u{a0}Meg\u{a0}"])
+        XCTAssertEqual(added.text, "Mac")
+        XCTAssertEqual(added.aliases, ["MEC", "Meg"])
+        XCTAssertEqual(try store.dictionaryTerm(id: added.id), added)
+
+        XCTAssertThrowsError(try store.addTerm(text: "Other", aliases: ["  mec \n"])) { error in
+            XCTAssertEqual(error as? DictionaryError, .conflict(value: "mec", termID: added.id))
+        }
+
+        let updated = try store.updateTerm(id: added.id, text: "\u{a0}MacBook\t", aliases: ["  ", " mac book ", "\n"])
+        XCTAssertEqual(updated.text, "MacBook")
+        XCTAssertEqual(updated.aliases, ["mac book"])
+        XCTAssertEqual(try store.dictionaryTerm(id: added.id), updated)
+    }
+
+    func testUpdateAndDeleteRecordCurrentDeviceID() throws {
+        let updatedTerm = try store.addTerm(text: "UpdateMe")
+        let deletedTerm = try store.addTerm(text: "DeleteMe")
+        let otherDeviceID = UUID()
+        XCTAssertNotEqual(otherDeviceID, store.deviceID)
+        try store.close()
+        let database = try DatabaseQueue(path: directory.appending(path: "store.sqlite").path)
+        try database.write { db in
+            try db.execute(sql: "UPDATE dictionaryTerms SET deviceID = ?", arguments: [otherDeviceID.uuidString])
+        }
+        try database.close()
+        store = try MemoryStore(directory: directory)
+        let edited = try store.updateTerm(id: updatedTerm.id, text: "Updated", aliases: [])
+        XCTAssertEqual(edited.deviceID, store.deviceID)
+        try store.deleteTerm(id: deletedTerm.id)
+        let tombstone = try XCTUnwrap(store.dictionaryTerm(id: deletedTerm.id))
+        XCTAssertEqual(tombstone.deviceID, store.deviceID)
+    }
+
     private func reopen() throws {
         try store.close()
         store = try MemoryStore(directory: directory)

@@ -22,8 +22,13 @@ final class TextCorrectionPerformanceTests: XCTestCase {
                     var corpus = (0..<words).map { paragraph[$0 % paragraph.count] }
                     if capped { corpus.replaceSubrange(0..<4, with: ["saffron", "cobalt", "rivet", "rivet"]) }
                     let input = corpus.joined(separator: " ")
-                    for _ in 0..<3 { _ = correctText(input, terms: terms) }
+                    let matcher = CorrectionMatcher(terms: terms)
+                    for _ in 0..<3 {
+                        _ = correctText(input, terms: terms)
+                        _ = matcher.correct(input)
+                    }
                     var times: [Double] = []
+                    var reusedTimes: [Double] = []
                     for _ in 0..<21 {
                         let start = ContinuousClock.now
                         let result = correctText(input, terms: terms)
@@ -31,11 +36,30 @@ final class TextCorrectionPerformanceTests: XCTestCase {
                         times.append(Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
                         XCTAssertEqual(result.converged, !capped)
                         if !capped { XCTAssertTrue(result.text.contains("ChatGPT Pro")) }
+
+                        let reusedStart = ContinuousClock.now
+                        let reusedResult = matcher.correct(input)
+                        let reusedElapsed = reusedStart.duration(to: .now).components
+                        reusedTimes.append(Double(reusedElapsed.seconds) * 1_000 + Double(reusedElapsed.attoseconds) / 1e15)
+                        XCTAssertEqual(reusedResult, result)
                     }
-                    print("DICTIONARY BENCH terms=\(count) aliases=2 words=\(words) mode=\(capped ? "eight-pass" : "fixed-point") median_ms=\(String(format: "%.3f", times.sorted()[10]))")
+                    print("DICTIONARY BENCH terms=\(count) aliases=2 words=\(words) mode=\(capped ? "eight-pass" : "fixed-point") rebuild_median_ms=\(String(format: "%.3f", times.sorted()[10])) rebuild_worst_ms=\(String(format: "%.3f", times.max() ?? 0)) reused_median_ms=\(String(format: "%.3f", reusedTimes.sorted()[10])) reused_worst_ms=\(String(format: "%.3f", reusedTimes.max() ?? 0))")
                 }
             }
         }
+        let terms500 = dictionary(count: 500)
+        let matcher500 = CorrectionMatcher(terms: terms500)
+        let longInput = (0..<1_200).map { paragraph[$0 % paragraph.count] }.joined(separator: " ")
+        for _ in 0..<3 { _ = matcher500.correct(longInput) }
+        var longTimes: [Double] = []
+        for _ in 0..<21 {
+            let start = ContinuousClock.now
+            let result = matcher500.correct(longInput)
+            let elapsed = start.duration(to: .now).components
+            longTimes.append(Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
+            XCTAssertTrue(result.converged)
+        }
+        print("DICTIONARY BENCH REUSED terms=500 aliases=2 words=1200 mode=fixed-point reused_median_ms=\(String(format: "%.3f", longTimes.sorted()[10])) reused_worst_ms=\(String(format: "%.3f", longTimes.max() ?? 0))")
     }
 
     private func dictionary(count: Int) -> [DictionaryTerm] {

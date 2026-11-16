@@ -10,6 +10,7 @@ Its whole job:
    - **Toggle-to-talk**: press once to start, press again to stop and transcribe.
 4. Paste the transcribed text into whatever app is focused.
 5. Save dictations locally by default, with a history window for search, copy, and deletion.
+6. Apply a local custom dictionary (`Settings → Dictionary`) to correct terms and aliases before pasting.
 
 Everything runs on-device. No accounts, no cloud.
 
@@ -80,12 +81,17 @@ Everything runs on-device. No accounts, no cloud.
 `VoiceAppCore.MemoryStore` stores mutable dictionary terms in `dictionaryTerms` in the same SQLite file
 and connection as records, added by the named migration `dictionary.createTerms`. Each term has a UUID,
 canonical `text`, `aliases`, UTC `updatedAt`, the persistent install `deviceID`, and optional `deletedAt`.
-Edits advance the per-term clock; deletion clears text and aliases and retains a terminal tombstone for
-future last-writer-wins sync. Listing returns live terms in UUID order. Empty or whitespace-only text is
-rejected. Two live terms cannot share a canonical spelling or alias under Unicode case folding and
-whitespace normalization; conflicts identify the value and owning term. Blank aliases are ignored.
+`addTerm` and `updateTerm` trim leading and trailing whitespace on term text and aliases and drop blank
+aliases before validating and saving. Edits advance the per-term clock and record the current `deviceID`;
+deletion clears text and aliases and retains a terminal tombstone for future last-writer-wins sync.
+Listing returns live terms in UUID order. Empty or whitespace-only text is rejected. Two live terms
+cannot share a canonical spelling or alias under Unicode case folding and whitespace normalization;
+conflicts identify the value and owning term.
 
-`correctText(_:terms:)` is pure and matches canonical spellings and literal aliases case-insensitively,
+`CorrectionMatcher` prebuilds the trie (stripping edge whitespace on terms and aliases) and exposes
+`correct(_:)` so `UserDictionary` can reuse the in-memory matcher across dictations without store I/O,
+rebuilding off the main actor only when terms load or change. `correctText(_:terms:)` constructs a
+matcher and runs `correct(_:)`. Matching is case-insensitive on canonical spellings and literal aliases,
 with any whitespace run between words. Unicode letters, marks, numbers and connector punctuation are
 word characters; apostrophes and hyphens joining word characters prevent a boundary, while surrounding
 quotes and punctuation allow one. Longer input matches win globally; ties use input position, term UUID,
@@ -97,7 +103,16 @@ limited to 1,048,576 UTF-16 units beyond the input; a pass exceeding that budget
 when converged. Chained edits merge overlapping original ranges, retaining the original substring, final
 replacement and last applied term UUID. Ranges are UTF-16 offsets in the original input; adjacent chains
 stay separate unless a later edit joins them. Bytes outside those ranges are preserved exactly.
-This slice provides no UI, app integration, number formatting, acoustic boosting or sync.
+
+`App.swift` shares one `SQLiteHistoryRepository` between `DictationHistory` and `UserDictionary`.
+`DictationController` delegates non-speech filtering, synchronous `dictionary.correct(_:)` correction,
+and `DictationHistory` delivery to `DictationDelivery` in `VoiceAppCore`, saving both the raw transcript
+(`rawText`) and corrected text (`finalText`) in `CompletedDictation`. If the dictionary store fails to open
+or load, `UserDictionary` logs the cause, displays an error in **Settings → Dictionary**,
+and leaves dictation pasting raw text. **Settings → Dictionary** lists terms, supports adding and editing
+canonical text and comma-separated aliases, deletes with confirmation, searches when 8 or more terms exist,
+and displays store validation errors in plain English. Number formatting, acoustic boosting, and sync remain
+separate.
 
 ## Model catalog (verified against `argmaxinc/whisperkit-coreml` on 2026-09-30)
 
@@ -123,9 +138,10 @@ Files are split between two implementers. Do **not** create or edit files you do
 against these contracts exactly.
 
 ### Core (models, transcription, UI)
-- `App.swift` — `@main struct VoiceApp: App`. Creates the single `ModelManager` and
-  `DictationController(modelManager:history:)`, calls `dictation.start()` once at launch, shows
-  `MenuBarExtra` whose icon reflects `dictation.state`, and a settings window.
+- `App.swift` — `@main struct VoiceApp: App`. Creates the single `ModelManager`, shared
+  `SQLiteHistoryRepository`, `DictationHistory`, `UserDictionary`, and
+  `DictationController(modelManager:history:dictionary:)`, calls `dictation.start()` once at launch,
+  shows `MenuBarExtra` whose icon reflects `dictation.state`, and a settings window.
 - `ModelCatalog.swift` — `struct TranscriptionModel: Identifiable, Hashable` + `static let all`.
 - `ModelManager.swift`:
   ```swift
@@ -138,7 +154,8 @@ against these contracts exactly.
   ```
 - `SettingsView.swift`, `MenuBarView.swift` — model list (download/progress/delete/select),
   shortcut recorders `KeyboardShortcuts.Recorder("Push to talk", name: .pushToTalk)` and
-  `.toggleToTalk`, permission status rows using `Permissions`, language picker optional.
+  `.toggleToTalk`, permission status rows using `Permissions`, language picker optional, and
+  **Dictionary** management.
 
 ### Input/Output (audio, hotkeys, insertion, permissions, packaging)
 - `HotkeyManager.swift` — defines
@@ -167,7 +184,7 @@ against these contracts exactly.
   @MainActor final class DictationController: ObservableObject {
       enum State: Equatable { case idle, recording, transcribing, error(String) }
       @Published private(set) var state: State
-      init(modelManager: ModelManager)
+      init(modelManager: ModelManager, history: DictationHistory, dictionary: UserDictionary)
       func start()          // register hotkeys; idempotent
   }
   ```
